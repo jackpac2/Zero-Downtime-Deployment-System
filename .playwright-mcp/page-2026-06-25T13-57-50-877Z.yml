@@ -1,0 +1,171 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "DeployGuard home" [ref=e5] [cursor=pointer]:
+      - /url: "#"
+      - img [ref=e7]
+      - generic [ref=e10]: DeployGuard
+    - navigation [ref=e11]:
+      - link "Platform" [ref=e12] [cursor=pointer]:
+        - /url: "#platform"
+      - link "Pipeline" [ref=e13] [cursor=pointer]:
+        - /url: "#pipeline"
+      - link "Milestones" [ref=e14] [cursor=pointer]:
+        - /url: "#milestones"
+      - link "Status" [ref=e15] [cursor=pointer]:
+        - /url: "#status"
+    - link "View pipeline" [ref=e16] [cursor=pointer]:
+      - /url: "#pipeline"
+      - text: View pipeline
+      - img [ref=e17]
+  - main [ref=e19]:
+    - generic [ref=e20]:
+      - generic [ref=e21]:
+        - generic [ref=e22]: Milestone 1 command center
+        - heading "Ship full-stack releases without the outage drama." [level=1] [ref=e24]
+        - paragraph [ref=e25]: DeployGuard turns a React and Node deployment into a visible pipeline for Docker, EC2, health checks, rollback decisions, and production signals.
+        - generic [ref=e26]:
+          - link "Explore platform" [ref=e27] [cursor=pointer]:
+            - /url: "#platform"
+            - text: Explore platform
+            - img [ref=e28]
+          - link "See milestones" [ref=e30] [cursor=pointer]:
+            - /url: "#milestones"
+        - generic [ref=e31]:
+          - generic [ref=e32]:
+            - img [ref=e33]
+            - text: GitHub Actions
+          - generic [ref=e39]:
+            - img [ref=e40]
+            - text: Health checks
+          - generic [ref=e43]:
+            - img [ref=e44]
+            - text: Rollback engine
+          - generic [ref=e48]:
+            - img [ref=e49]
+            - text: Alerts
+          - generic [ref=e51]:
+            - img [ref=e52]
+            - text: Guardrails
+      - generic "Deployment pipeline preview" [ref=e55]:
+        - generic [ref=e57]:
+          - generic [ref=e58]:
+            - generic [ref=e59]:
+              - paragraph [ref=e60]: Production release
+              - paragraph [ref=e61]: api-v1.8.0 to EC2
+            - generic [ref=e62]: Healthy
+          - generic [ref=e63]:
+            - generic [ref=e64]:
+              - generic [ref=e65]:
+                - generic [ref=e66]: "1"
+                - generic [ref=e67]: Build image
+              - img [ref=e68]
+            - generic [ref=e71]:
+              - generic [ref=e72]:
+                - generic [ref=e73]: "2"
+                - generic [ref=e74]: Compose up
+              - img [ref=e75]
+            - generic [ref=e78]:
+              - generic [ref=e79]:
+                - generic [ref=e80]: "3"
+                - generic [ref=e81]: Probe /api/health
+              - img [ref=e82]
+            - generic [ref=e85]:
+              - generic [ref=e86]:
+                - generic [ref=e87]: "4"
+                - generic [ref=e88]: Promote release
+              - img [ref=e89]
+          - generic [ref=e92]:
+            - generic [ref=e93]:
+              - img [ref=e94]
+              - paragraph [ref=e97]: Target
+              - paragraph [ref=e98]: EC2 Ubuntu
+            - generic [ref=e99]:
+              - paragraph [ref=e100]: Rollback window
+              - paragraph [ref=e101]: Ready
+    - generic [ref=e103]:
+      - generic [ref=e104]:
+        - paragraph [ref=e105]: 99.99%
+        - paragraph [ref=e106]: target availability
+      - generic [ref=e107]:
+        - paragraph [ref=e108]: <60s
+        - paragraph [ref=e109]: rollback decision window
+      - generic [ref=e110]:
+        - paragraph [ref=e111]: "7"
+        - paragraph [ref=e112]: delivery milestones
+      - generic [ref=e113]:
+        - paragraph [ref=e114]: 24/7
+        - paragraph [ref=e115]: deployment signal coverage
+    - generic [ref=e116]:
+      - generic [ref=e117]:
+        - paragraph [ref=e118]: Platform
+        - heading "Built around the deployment problems that usually stay invisible." [level=2] [ref=e119]
+        - paragraph [ref=e120]: "The interface frames every release as a system: containers, health, routing, rollback, and the lessons learned when something breaks."
+      - generic [ref=e121]:
+        - article [ref=e122]:
+          - img [ref=e124]
+          - heading "Compose-ready services" [level=3] [ref=e128]
+          - paragraph [ref=e129]: Frontend and API services are shaped for Docker Compose so EC2 runs the same workflow every time.
+        - article [ref=e130]:
+          - img [ref=e132]
+          - heading "Health-gated releases" [level=3] [ref=e135]
+          - paragraph [ref=e136]: Readiness checks make deployment status explicit before a release is treated as successful.
+        - article [ref=e137]:
+          - img [ref=e139]
+          - heading "Rollback confidence" [level=3] [ref=e143]
+          - paragraph [ref=e144]: Failed releases can restore the previous working version instead of leaving production uncertain.
+        - article [ref=e145]:
+          - img [ref=e147]
+          - heading "Observable delivery" [level=3] [ref=e149]
+          - paragraph [ref=e150]: Deployment events, alerts, and history keep operational context visible beyond a green build.
+    - generic [ref=e152]:
+      - generic [ref=e153]:
+        - paragraph [ref=e154]: Pipeline
+        - heading "A roadmap that turns deployment failures into operating knowledge." [level=2] [ref=e155]
+        - paragraph [ref=e156]: Each milestone keeps the product surface focused on the next practical capability, from EC2 basics to observable rollback automation.
+      - generic [ref=e157]:
+        - article [ref=e158]:
+          - generic [ref=e159]:
+            - generic [ref=e160]:
+              - paragraph [ref=e161]: Milestone 1
+              - heading "It runs on EC2" [level=3] [ref=e162]
+            - generic [ref=e163]: Live
+          - paragraph [ref=e164]: React frontend, Node API, and Docker Compose running behind a public EC2 address.
+        - article [ref=e165]:
+          - generic [ref=e166]:
+            - generic [ref=e167]:
+              - paragraph [ref=e168]: Milestone 2
+              - heading "Nginx becomes the gatekeeper" [level=3] [ref=e169]
+            - generic [ref=e170]: Next
+          - paragraph [ref=e171]: Route browser traffic to the frontend and API traffic to the backend through one edge.
+        - article [ref=e172]:
+          - generic [ref=e173]:
+            - generic [ref=e174]:
+              - paragraph [ref=e175]: Milestone 4
+              - heading "GitHub Actions CI/CD" [level=3] [ref=e176]
+            - generic [ref=e177]: Planned
+          - paragraph [ref=e178]: Build, deploy, and manage secrets from a repeatable pipeline instead of manual steps.
+        - article [ref=e179]:
+          - generic [ref=e180]:
+            - generic [ref=e181]:
+              - paragraph [ref=e182]: Milestone 7
+              - heading "Production observability" [level=3] [ref=e183]
+            - generic [ref=e184]: Planned
+          - paragraph [ref=e185]: Discord notifications, deployment history, and operational visibility for every release.
+    - generic [ref=e187]:
+      - generic [ref=e188]:
+        - paragraph [ref=e189]: Ready for milestone 1
+        - heading "Start with a frontend that already feels production-minded." [level=2] [ref=e190]
+        - paragraph [ref=e191]: The next layer can connect the Node API, Docker Compose, and EC2 deployment flow without redesigning the first impression.
+      - generic [ref=e192]:
+        - button "Check API health" [ref=e193]:
+          - img [ref=e194]
+          - text: Check API health
+        - paragraph [ref=e196]: Backend status has not been checked yet.
+        - link "Back to top" [ref=e197] [cursor=pointer]:
+          - /url: "#"
+          - text: Back to top
+          - img [ref=e198]
+  - contentinfo [ref=e200]:
+    - generic [ref=e201]:
+      - paragraph [ref=e202]: DeployGuard zero-downtime deployment pipeline.
+      - paragraph [ref=e203]: React frontend foundation for Milestone 1.
