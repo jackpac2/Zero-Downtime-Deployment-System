@@ -13,6 +13,7 @@ BRANCH="$3"
 
 if [ -d "$APP_DIR/.git" ]; then
   cd "$APP_DIR"
+  git config core.fileMode false
   git fetch origin "$BRANCH"
   git checkout "$BRANCH"
   git pull --ff-only origin "$BRANCH"
