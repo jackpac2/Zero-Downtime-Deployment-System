@@ -24,14 +24,23 @@ if [ -f .deploy/current.sha ]; then
   cp .deploy/current.sha .deploy/previous.sha
 fi
 
-if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
-  printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+if docker info >/dev/null 2>&1; then
+  DOCKER=(docker)
+elif sudo -n docker info >/dev/null 2>&1; then
+  DOCKER=(sudo -n docker)
+else
+  echo "Cannot access Docker. Add the deploy user to the docker group or allow passwordless sudo for docker." >&2
+  exit 1
 fi
 
-docker compose -f compose/docker-compose.prod.yml pull
-docker compose -f compose/docker-compose.prod.yml up -d
+if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
+  printf '%s' "$GHCR_TOKEN" | "${DOCKER[@]}" login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+fi
 
-docker image prune -f
-docker ps
+"${DOCKER[@]}" compose -f compose/docker-compose.prod.yml pull
+"${DOCKER[@]}" compose -f compose/docker-compose.prod.yml up -d
+
+"${DOCKER[@]}" image prune -f
+"${DOCKER[@]}" ps
 
 printf '%s\n' "$GIT_SHA" > .deploy/current.sha
