@@ -134,10 +134,13 @@ jobs:
           chmod 600 ~/.ssh/ec2_deploy_key
           ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
 
-          # The server-side script owns Compose behavior. The runner only updates
-          # the repo copy, makes the script executable, and starts the deployment.
+          # Bootstrap the ubuntu user's repo copy if the clone only exists elsewhere.
           ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "cd '$EC2_APP_DIR' && git pull origin Main && chmod +x scripts/deploy.sh && GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' ./scripts/deploy.sh '$DEPLOY_SHA'"
+            "bash -s -- '$EC2_APP_DIR' 'https://github.com/${{ github.repository }}.git' 'Main'" < scripts/ensure-ec2-repo.sh
+
+          # The server-side script owns Compose behavior and image deployment.
+          ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "cd '$EC2_APP_DIR' && chmod +x scripts/deploy.sh && GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' ./scripts/deploy.sh '$DEPLOY_SHA'"
 
       - name: Run post-deployment smoke tests
         env:

@@ -9,6 +9,7 @@ The application source code is shared between development and production:
 - `nginx/` contains the Nginx reverse proxy configuration.
 - `compose/docker-compose.dev.yml` is for local development and manual testing.
 - `compose/docker-compose.prod.yml` is for production deployment on EC2.
+- `scripts/ensure-ec2-repo.sh` bootstraps the repo into the ubuntu user's EC2 app directory if it is missing.
 - `scripts/deploy.sh` is the EC2 deployment entrypoint.
 - `.github/workflows/deploy.yml` is the GitHub Actions workflow.
 
@@ -187,3 +188,11 @@ curl -f http://$EC2_HOST/api/health
 ```
 
 These smoke tests are simple Phase 6 checks only. Full health-check retry logic, rollback, alerts, and blue-green deployment remain Phase 7 work.
+
+## EC2 Repo Bootstrap
+
+The deploy workflow now runs `scripts/ensure-ec2-repo.sh` over SSH before it runs `scripts/deploy.sh`.
+
+The bootstrap script checks whether `/home/ubuntu/Zero-Downtime-Deployment-System/.git` exists for the `ubuntu` user. If it exists, the script fetches and fast-forwards the `Main` branch. If it does not exist and the target directory is empty or missing, the script clones `https://github.com/jackpac2/Zero-Downtime-Deployment-System.git` into the ubuntu user's app directory.
+
+This fixes the case where the repository was cloned under the root account but not under `/home/ubuntu`. EC2 still does not build images; after the repo exists for `ubuntu`, `scripts/deploy.sh <git-sha>` pulls and runs the exact GHCR images for that commit.
