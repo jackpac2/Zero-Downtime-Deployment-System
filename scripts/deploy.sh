@@ -10,6 +10,8 @@ fi
 GIT_SHA="$1"
 APP_DIR="/home/ubuntu/Zero-Downtime-Deployment-System"
 BRANCH="Main"
+COMPOSE_PROJECT_NAME="zero-downtime"
+COMPOSE_FILE="compose/docker-compose.prod.yml"
 
 cd "$APP_DIR"
 
@@ -34,14 +36,41 @@ else
   exit 1
 fi
 
+COMPOSE=("${DOCKER[@]}" compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE")
+
+cleanup_legacy_container() {
+  local name="$1"
+  local container_id
+  local project_label
+
+  container_id=$("${DOCKER[@]}" ps -aq --filter "name=^/${name}$" | head -n 1)
+  if [ -z "$container_id" ]; then
+    return
+  fi
+
+  project_label=$("${DOCKER[@]}" inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$container_id" 2>/dev/null || true)
+  if [ "$project_label" = "$COMPOSE_PROJECT_NAME" ]; then
+    return
+  fi
+
+  echo "Removing legacy conflicting container '${name}' from Compose project '${project_label:-none}'."
+  "${DOCKER[@]}" rm -f "$container_id"
+}
+
+# One-time migration cleanup for containers created by the old hardcoded
+# container_name settings or by a different default Compose project name.
+cleanup_legacy_container zero-downtime-nginx
+cleanup_legacy_container zero-downtime-frontend
+cleanup_legacy_container zero-downtime-backend
+
 if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
   printf '%s' "$GHCR_TOKEN" | "${DOCKER[@]}" login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 fi
 
-"${DOCKER[@]}" compose -f compose/docker-compose.prod.yml pull
-"${DOCKER[@]}" compose -f compose/docker-compose.prod.yml up -d
+"${COMPOSE[@]}" pull
+"${COMPOSE[@]}" up -d --remove-orphans
 
 "${DOCKER[@]}" image prune -f
-"${DOCKER[@]}" ps
+"${COMPOSE[@]}" ps
 
 printf '%s\n' "$GIT_SHA" > .deploy/current.sha

@@ -1,7 +1,6 @@
 services:
   nginx:
     image: nginx:1.27-alpine
-    container_name: zero-downtime-nginx
     depends_on:
       - frontend
       - backend
@@ -13,14 +12,12 @@ services:
 
   frontend:
     image: ghcr.io/jackpac2/zero-downtime-frontend:${IMAGE_TAG}
-    container_name: zero-downtime-frontend
     expose:
       - "80"
     restart: unless-stopped
 
   backend:
     image: ghcr.io/jackpac2/zero-downtime-backend:${IMAGE_TAG}
-    container_name: zero-downtime-backend
     environment:
       NODE_ENV: production
       PORT: 3001

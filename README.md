@@ -82,8 +82,8 @@ It performs these steps:
 - Exports `IMAGE_TAG=<git-sha>`.
 - Creates `.deploy/` if needed.
 - Copies `.deploy/current.sha` to `.deploy/previous.sha` before deployment.
-- Runs `docker compose -f compose/docker-compose.prod.yml pull`.
-- Runs `docker compose -f compose/docker-compose.prod.yml up -d`.
+- Runs `docker compose -p zero-downtime -f compose/docker-compose.prod.yml pull`.
+- Runs `docker compose -p zero-downtime -f compose/docker-compose.prod.yml up -d --remove-orphans`.
 - Removes unused old images with `docker image prune -f`.
 - Shows running containers with `docker ps`.
 - Writes `.deploy/current.sha` only after Compose deployment succeeds.
@@ -176,7 +176,7 @@ The deployment workflow validates the app before publishing images:
 
 - Frontend: `npm ci`, `npm run lint --if-present`, `npm test --if-present`, and `npm run build`.
 - Backend: `npm ci`, `npm run lint --if-present`, `npm test --if-present`, and `npm run check --if-present`.
-- Production Compose: `docker compose -f compose/docker-compose.prod.yml config`.
+- Production Compose: `IMAGE_TAG=<git-sha> docker compose -p zero-downtime -f compose/docker-compose.prod.yml config`.
 
 The workflow also uses Docker Buildx cache, OCI image labels, production deployment concurrency, the `production` GitHub Environment, path filters, post-deployment smoke tests, and a GitHub Actions deployment summary.
 
@@ -196,3 +196,9 @@ The deploy workflow now runs `scripts/ensure-ec2-repo.sh` over SSH before it run
 The bootstrap script checks whether `/home/ubuntu/Zero-Downtime-Deployment-System/.git` exists for the `ubuntu` user. If it exists, the script fetches and fast-forwards the `Main` branch. If it does not exist and the target directory is empty or missing, the script clones `https://github.com/jackpac2/Zero-Downtime-Deployment-System.git` into the ubuntu user's app directory.
 
 This fixes the case where the repository was cloned under the root account but not under `/home/ubuntu`. EC2 still does not build images; after the repo exists for `ubuntu`, `scripts/deploy.sh <git-sha>` pulls and runs the exact GHCR images for that commit.
+
+## Compose Project Naming
+
+Production Compose uses the explicit project name `zero-downtime`. The production Compose file does not hardcode `container_name`, so Docker Compose can create and reconcile project-scoped containers such as `zero-downtime-backend-1` across repeated deployments.
+
+Older deployments used fixed names like `zero-downtime-backend`. The deploy script includes targeted one-time cleanup for those legacy names only when they belong to another Compose project or a manual container. This prevents name conflicts while keeping repeated deployments idempotent.
