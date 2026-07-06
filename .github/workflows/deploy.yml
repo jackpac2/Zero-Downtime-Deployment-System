@@ -1,0 +1,167 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - Main
+    paths:
+      - frontend/**
+      - backend/**
+      - nginx/**
+      - compose/**
+      - scripts/**
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  FRONTEND_IMAGE: ghcr.io/jackpac2/zero-downtime-frontend
+  BACKEND_IMAGE: ghcr.io/jackpac2/zero-downtime-backend
+  PROD_COMPOSE_FILE: compose/docker-compose.prod.yml
+
+jobs:
+  build-and-deploy:
+    name: Validate, Build, Push, and Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare image metadata
+        id: vars
+        run: |
+          echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            backend/package-lock.json
+
+      - name: Validate frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint --if-present
+          npm test --if-present
+          npm run build
+
+      - name: Validate backend
+        working-directory: backend
+        run: |
+          npm ci
+          npm run lint --if-present
+          npm test --if-present
+          npm run check --if-present
+
+      - name: Validate production Compose config
+        run: docker compose -f "$PROD_COMPOSE_FILE" config
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ steps.vars.outputs.sha }}
+            ${{ env.FRONTEND_IMAGE }}:${{ steps.vars.outputs.short_sha }}
+            ${{ env.FRONTEND_IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.vars.outputs.sha }}
+            org.opencontainers.image.created=${{ steps.vars.outputs.created }}
+            org.opencontainers.image.title=zero-downtime-frontend
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:${{ steps.vars.outputs.sha }}
+            ${{ env.BACKEND_IMAGE }}:${{ steps.vars.outputs.short_sha }}
+            ${{ env.BACKEND_IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.vars.outputs.sha }}
+            org.opencontainers.image.created=${{ steps.vars.outputs.created }}
+            org.opencontainers.image.title=zero-downtime-backend
+
+      - name: Deploy exact commit to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_APP_DIR: ${{ secrets.EC2_APP_DIR }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2_deploy_key
+          chmod 600 ~/.ssh/ec2_deploy_key
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+          # The server-side script owns Compose behavior. The runner only updates
+          # the repo copy, makes the script executable, and starts the deployment.
+          ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "cd '$EC2_APP_DIR' && git pull origin Main && chmod +x scripts/deploy.sh && GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' ./scripts/deploy.sh '$DEPLOY_SHA'"
+
+      - name: Run post-deployment smoke tests
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          curl -f "http://${EC2_HOST}"
+          curl -f "http://${EC2_HOST}/api/health"
+
+      - name: Write deployment summary
+        if: always()
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          {
+            echo "## Production Deployment Summary"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Deployed Git SHA | ${{ steps.vars.outputs.sha }} |"
+            echo "| Short Git SHA | ${{ steps.vars.outputs.short_sha }} |"
+            echo "| Frontend image | ${{ env.FRONTEND_IMAGE }}:${{ steps.vars.outputs.sha }} |"
+            echo "| Backend image | ${{ env.BACKEND_IMAGE }}:${{ steps.vars.outputs.sha }} |"
+            echo "| EC2 host | ${EC2_HOST} |"
+            echo "| Production Compose file | ${{ env.PROD_COMPOSE_FILE }} |"
+            echo "| Smoke test result | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
