@@ -148,9 +148,27 @@ jobs:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
           set -euo pipefail
-          curl -f "http://${EC2_HOST}"
-          curl -f "http://${EC2_HOST}/api/health"
 
+          smoke_test() {
+            local url="$1"
+            local attempts=12
+            local delay=5
+
+            for attempt in $(seq 1 "$attempts"); do
+              if curl -fsS "$url" >/dev/null; then
+                echo "Smoke test passed: $url"
+                return 0
+              fi
+
+              echo "Smoke test attempt ${attempt}/${attempts} failed: $url"
+              sleep "$delay"
+            done
+
+            curl -f "$url"
+          }
+
+          smoke_test "http://${EC2_HOST}"
+          smoke_test "http://${EC2_HOST}/api/health"
       - name: Write deployment summary
         if: always()
         env:

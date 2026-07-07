@@ -22,7 +22,13 @@ git pull --ff-only origin "$BRANCH"
 
 export IMAGE_TAG="$GIT_SHA"
 
+if [ -z "${GIT_SHA:-}" ]; then
+  echo "Usage: ./scripts/deploy.sh <git-sha>"
+  exit 1
+fi
+
 mkdir -p .deploy
+
 if [ -f .deploy/current.sha ]; then
   cp .deploy/current.sha .deploy/previous.sha
 fi
@@ -37,6 +43,17 @@ else
 fi
 
 COMPOSE=("${DOCKER[@]}" compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE")
+
+dump_compose_diagnostics() {
+  echo "Deployment failed. Compose service status:"
+  "${COMPOSE[@]}" ps || true
+  echo "Recent backend logs:"
+  "${COMPOSE[@]}" logs --tail=100 backend || true
+  echo "Recent nginx logs:"
+  "${COMPOSE[@]}" logs --tail=100 nginx || true
+}
+
+trap dump_compose_diagnostics ERR
 
 cleanup_legacy_container() {
   local name="$1"
@@ -68,9 +85,9 @@ if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
 fi
 
 "${COMPOSE[@]}" pull
-"${COMPOSE[@]}" up -d --remove-orphans
-
-"${DOCKER[@]}" image prune -f
+"${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 60
 "${COMPOSE[@]}" ps
 
 printf '%s\n' "$GIT_SHA" > .deploy/current.sha
+
+"${DOCKER[@]}" image prune -f || true
