@@ -20,7 +20,7 @@ app.use((req, res, next) => {
 })
 
 app.get('/api/health', (_req, res) => {
-  res.status(200).json({
+  res.status(500).json({
     status: 'ok',
     service: 'zero-downtime-backend',
     uptime: Math.round(process.uptime()),
