@@ -86,6 +86,10 @@ fi
 
 "${COMPOSE[@]}" pull
 "${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 60
+
+echo "Restarting nginx to refresh upstream resolution..."
+"${COMPOSE[@]}" restart nginx
+
 "${COMPOSE[@]}" ps
 
 printf '%s\n' "$GIT_SHA" > .deploy/current.sha
