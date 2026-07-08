@@ -2,16 +2,20 @@
 
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
+if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
   echo "Usage: $0 <git-sha>" >&2
   exit 1
 fi
 
 GIT_SHA="$1"
-APP_DIR="/home/ubuntu/Zero-Downtime-Deployment-System"
+APP_DIR="${EC2_APP_DIR:-/home/ubuntu/Zero-Downtime-Deployment-System}"
 BRANCH="Main"
 COMPOSE_PROJECT_NAME="zero-downtime"
 COMPOSE_FILE="compose/docker-compose.prod.yml"
+DEPLOY_DIR=".deploy"
+CURRENT_SHA_FILE="${DEPLOY_DIR}/current.sha"
+PREVIOUS_SHA_FILE="${DEPLOY_DIR}/previous.sha"
+FAILED_SHA_FILE="${DEPLOY_DIR}/failed.sha"
 
 cd "$APP_DIR"
 
@@ -20,18 +24,18 @@ git fetch origin "$BRANCH"
 git checkout "$BRANCH"
 git pull --ff-only origin "$BRANCH"
 
+mkdir -p "$DEPLOY_DIR"
+
+OLD_CURRENT_SHA=""
+if [ -f "$CURRENT_SHA_FILE" ]; then
+  OLD_CURRENT_SHA="$(tr -d '[:space:]' < "$CURRENT_SHA_FILE")"
+fi
+
+if [ -n "$OLD_CURRENT_SHA" ]; then
+  printf '%s\n' "$OLD_CURRENT_SHA" > "$PREVIOUS_SHA_FILE"
+fi
+
 export IMAGE_TAG="$GIT_SHA"
-
-if [ -z "${GIT_SHA:-}" ]; then
-  echo "Usage: ./scripts/deploy.sh <git-sha>"
-  exit 1
-fi
-
-mkdir -p .deploy
-
-if [ -f .deploy/current.sha ]; then
-  cp .deploy/current.sha .deploy/previous.sha
-fi
 
 if docker info >/dev/null 2>&1; then
   DOCKER=(docker)
@@ -44,6 +48,16 @@ fi
 
 COMPOSE=("${DOCKER[@]}" compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE")
 
+if [ -n "${APP_URL:-}" ]; then
+  VERIFY_APP_URL="$APP_URL"
+elif [ -n "${EC2_HOST:-}" ]; then
+  VERIFY_APP_URL="http://${EC2_HOST}"
+else
+  echo "APP_URL or EC2_HOST is required for Phase 7 deployment verification." >&2
+  echo "Set APP_URL to the public app URL or EC2_HOST to the public EC2 hostname/IP." >&2
+  exit 1
+fi
+
 dump_compose_diagnostics() {
   echo "Deployment failed. Compose service status:"
   "${COMPOSE[@]}" ps || true
@@ -51,6 +65,29 @@ dump_compose_diagnostics() {
   "${COMPOSE[@]}" logs --tail=100 backend || true
   echo "Recent nginx logs:"
   "${COMPOSE[@]}" logs --tail=100 nginx || true
+}
+
+rollback_after_failed_deploy() {
+  if [ ! -f "$PREVIOUS_SHA_FILE" ] || [ -z "$(tr -d '[:space:]' < "$PREVIOUS_SHA_FILE")" ]; then
+    echo "Rollback cannot run because ${PREVIOUS_SHA_FILE} is missing or empty." >&2
+    echo "Current deployment marker remains unchanged." >&2
+    return 1
+  fi
+
+  echo "Starting automatic rollback to $(tr -d '[:space:]' < "$PREVIOUS_SHA_FILE")."
+  if ./scripts/rollback.sh; then
+    echo "Rollback command completed. Verifying restored deployment..."
+    if ./scripts/verify-deployment.sh "$VERIFY_APP_URL"; then
+      echo "Automatic rollback succeeded and verification passed."
+      return 0
+    fi
+
+    echo "Automatic rollback completed, but rollback verification failed." >&2
+    return 1
+  fi
+
+  echo "Automatic rollback failed." >&2
+  return 1
 }
 
 trap dump_compose_diagnostics ERR
@@ -92,6 +129,17 @@ echo "Restarting nginx to refresh upstream resolution..."
 
 "${COMPOSE[@]}" ps
 
-printf '%s\n' "$GIT_SHA" > .deploy/current.sha
+if ./scripts/verify-deployment.sh "$VERIFY_APP_URL"; then
+  printf '%s\n' "$GIT_SHA" > "$CURRENT_SHA_FILE"
+  "${DOCKER[@]}" image prune -f || true
 
-"${DOCKER[@]}" image prune -f || true
+  echo "Deployment succeeded. Current deployment is now ${GIT_SHA}."
+  exit 0
+fi
+
+printf '%s\n' "$GIT_SHA" > "$FAILED_SHA_FILE"
+echo "Deployment verification failed for ${GIT_SHA}." >&2
+dump_compose_diagnostics
+
+rollback_after_failed_deploy || true
+exit 1

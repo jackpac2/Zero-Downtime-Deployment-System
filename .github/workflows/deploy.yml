@@ -141,7 +141,7 @@ jobs:
 
           # The server-side script owns Compose behavior and image deployment.
           ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "cd '$EC2_APP_DIR' && chmod +x scripts/deploy.sh && GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' ./scripts/deploy.sh '$DEPLOY_SHA'"
+            "cd '$EC2_APP_DIR' && APP_URL=\"http://$EC2_HOST\" EC2_APP_DIR='$EC2_APP_DIR' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' ./scripts/deploy.sh '$DEPLOY_SHA'"
 
       - name: Run post-deployment smoke tests
         env:
@@ -187,3 +187,4 @@ jobs:
             echo "| Production Compose file | ${{ env.PROD_COMPOSE_FILE }} |"
             echo "| Smoke test result | ${{ job.status }} |"
           } >> "$GITHUB_STEP_SUMMARY"
+
