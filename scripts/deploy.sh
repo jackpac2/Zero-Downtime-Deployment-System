@@ -36,6 +36,7 @@ if [ -n "$OLD_CURRENT_SHA" ]; then
 fi
 
 export IMAGE_TAG="$GIT_SHA"
+export DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
 if docker info >/dev/null 2>&1; then
   DOCKER=(docker)
