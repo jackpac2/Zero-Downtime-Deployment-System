@@ -64,7 +64,7 @@ fi
 
 ROLLBACK_SHA="$(tr -d '[:space:]' < "$PREVIOUS_SHA_FILE")"
 
-if [ -z "$ROLLBACK_SHA" ]; then
+if [[ ! "$ROLLBACK_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
   fail_rollback "Rollback failed: target in ${PREVIOUS_SHA_FILE} is empty or invalid."
 fi
 
