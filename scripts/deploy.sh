@@ -16,6 +16,13 @@ DEPLOY_DIR=".deploy"
 CURRENT_SHA_FILE="${DEPLOY_DIR}/current.sha"
 PREVIOUS_SHA_FILE="${DEPLOY_DIR}/previous.sha"
 FAILED_SHA_FILE="${DEPLOY_DIR}/failed.sha"
+ROLLBACK_TARGET_READY=false
+DEPLOYMENT_ATTEMPT_ACTIVE=false
+ROLLBACK_IN_PROGRESS=false
+ROLLBACK_ATTEMPTED=false
+DEPLOYMENT_COMPLETED=false
+DEPLOYMENT_FAILED_ALERT_SENT=false
+DEPLOYMENT_STAGE="setup"
 
 cd "$APP_DIR"
 
@@ -33,6 +40,7 @@ fi
 
 if [ -n "$OLD_CURRENT_SHA" ]; then
   printf '%s\n' "$OLD_CURRENT_SHA" > "$PREVIOUS_SHA_FILE"
+  ROLLBACK_TARGET_READY=true
 fi
 
 export IMAGE_TAG="$GIT_SHA"
@@ -103,30 +111,60 @@ dump_compose_diagnostics() {
   "${COMPOSE[@]}" logs --tail=100 nginx || true
 }
 
-rollback_after_failed_deploy() {
-  if [ ! -f "$PREVIOUS_SHA_FILE" ] || [ -z "$(tr -d '[:space:]' < "$PREVIOUS_SHA_FILE")" ]; then
-    echo "Rollback cannot run because ${PREVIOUS_SHA_FILE} is missing or empty." >&2
-    echo "Current deployment marker remains unchanged." >&2
-    return 1
+handle_deployment_failure() {
+  local original_exit_code=$?
+  local rollback_exit_code
+  local failure_message
+
+  # Disable the trap immediately so failures during diagnostics or rollback cannot recurse.
+  trap - ERR
+
+  if [ "$original_exit_code" -eq 0 ]; then
+    original_exit_code=1
+  fi
+
+  if [ "$DEPLOYMENT_ATTEMPT_ACTIVE" != true ] || [ "$DEPLOYMENT_COMPLETED" = true ]; then
+    exit "$original_exit_code"
+  fi
+
+  DEPLOYMENT_ATTEMPT_ACTIVE=false
+  if [ "$ROLLBACK_IN_PROGRESS" = true ] || [ "$ROLLBACK_ATTEMPTED" = true ]; then
+    exit "$original_exit_code"
+  fi
+
+  ROLLBACK_IN_PROGRESS=true
+  ROLLBACK_ATTEMPTED=true
+  failure_message="Deployment failed during ${DEPLOYMENT_STAGE} for SHA ${GIT_SHA}; rollback is starting."
+
+  if ! printf '%s\n' "$GIT_SHA" > "$FAILED_SHA_FILE"; then
+    echo "[warn] failed to write deployment failure state: ${FAILED_SHA_FILE}" >&2
+  fi
+
+  if [ "$DEPLOYMENT_FAILED_ALERT_SENT" != true ]; then
+    send_alert "deployment_failed" "error" "$failure_message" || true
+    DEPLOYMENT_FAILED_ALERT_SENT=true
+  fi
+
+  dump_compose_diagnostics || true
+
+  if [ "$ROLLBACK_TARGET_READY" != true ]; then
+    echo "Automatic rollback skipped because no safe rollback target was established." >&2
+    exit "$original_exit_code"
   fi
 
   echo "Starting automatic rollback to $(tr -d '[:space:]' < "$PREVIOUS_SHA_FILE")."
   if ./scripts/rollback.sh; then
-    echo "Rollback command completed. Verifying restored deployment..."
-    if ./scripts/verify-deployment.sh "$VERIFY_APP_URL"; then
-      echo "Automatic rollback succeeded and verification passed."
-      return 0
-    fi
-
-    echo "Automatic rollback completed, but rollback verification failed." >&2
-    return 1
+    echo "Automatic rollback succeeded."
+  else
+    rollback_exit_code=$?
+    echo "Automatic rollback failed with exit code ${rollback_exit_code}." >&2
   fi
 
-  echo "Automatic rollback failed." >&2
-  return 1
-}
+  ROLLBACK_IN_PROGRESS=false
 
-trap dump_compose_diagnostics ERR
+  # Preserve the deployment failure even when rollback restores production successfully.
+  exit "$original_exit_code"
+}
 
 cleanup_legacy_container() {
   local name="$1"
@@ -149,36 +187,48 @@ cleanup_legacy_container() {
 
 # One-time migration cleanup for containers created by the old hardcoded
 # container_name settings or by a different default Compose project name.
+# Failure handling starts at the first command that can change the production stack.
+# Rollback itself remains guarded until previous.sha contains the known healthy SHA.
+DEPLOYMENT_ATTEMPT_ACTIVE=true
+trap handle_deployment_failure ERR
+
+DEPLOYMENT_STAGE="legacy container cleanup"
 cleanup_legacy_container zero-downtime-nginx
 cleanup_legacy_container zero-downtime-frontend
 cleanup_legacy_container zero-downtime-backend
 
 send_alert "deployment_started" "info" "Deployment started for SHA ${GIT_SHA}." || true
+
+DEPLOYMENT_STAGE="GHCR login"
 if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
   printf '%s' "$GHCR_TOKEN" | "${DOCKER[@]}" login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 fi
 
+DEPLOYMENT_STAGE="pulling deployment images"
 "${COMPOSE[@]}" pull
+
+DEPLOYMENT_STAGE="starting deployment services"
 "${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 60
 
 echo "Restarting nginx to refresh upstream resolution..."
+DEPLOYMENT_STAGE="restarting nginx"
 "${COMPOSE[@]}" restart nginx
 
+DEPLOYMENT_STAGE="reading Compose service status"
 "${COMPOSE[@]}" ps
 
-if ./scripts/verify-deployment.sh "$VERIFY_APP_URL"; then
-  printf '%s\n' "$GIT_SHA" > "$CURRENT_SHA_FILE"
-  send_alert "deployment_success" "success" "Deployment verified successfully for SHA ${GIT_SHA}." || true
-  "${DOCKER[@]}" image prune -f || true
+DEPLOYMENT_STAGE="verifying the deployment"
+./scripts/verify-deployment.sh "$VERIFY_APP_URL"
 
-  echo "Deployment succeeded. Current deployment is now ${GIT_SHA}."
-  exit 0
-fi
+DEPLOYMENT_STAGE="recording verified deployment state"
+printf '%s\n' "$GIT_SHA" > "$CURRENT_SHA_FILE"
 
-printf '%s\n' "$GIT_SHA" > "$FAILED_SHA_FILE"
-echo "Deployment verification failed for ${GIT_SHA}." >&2
-send_alert "deployment_failed" "error" "Deployment failed verification for SHA ${GIT_SHA}; rollback is starting." || true
-dump_compose_diagnostics
+DEPLOYMENT_COMPLETED=true
+DEPLOYMENT_ATTEMPT_ACTIVE=false
+trap - ERR
 
-rollback_after_failed_deploy || true
-exit 1
+send_alert "deployment_success" "success" "Deployment verified successfully for SHA ${GIT_SHA}." || true
+"${DOCKER[@]}" image prune -f || true
+
+echo "Deployment succeeded. Current deployment is now ${GIT_SHA}."
+exit 0
