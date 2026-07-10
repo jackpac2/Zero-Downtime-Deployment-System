@@ -36,6 +36,7 @@ if [ -n "$OLD_CURRENT_SHA" ]; then
 fi
 
 export IMAGE_TAG="$GIT_SHA"
+export DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
 if docker info >/dev/null 2>&1; then
   DOCKER=(docker)
@@ -57,6 +58,41 @@ else
   echo "Set APP_URL to the public app URL or EC2_HOST to the public EC2 hostname/IP." >&2
   exit 1
 fi
+
+json_escape() {
+  local value="${1:-}"
+  value=${value//\\/\\\\}
+  value=${value//"/\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+send_alert() {
+  local event="$1"
+  local status="$2"
+  local message="$3"
+  local alert_app_url="${APP_URL:-${VERIFY_APP_URL:-}}"
+  local payload
+
+  payload=$(printf '{"project":"%s","environment":"%s","sha":"%s","appUrl":"%s","event":"%s","status":"%s","message":"%s"}' \
+    "$(json_escape "Zero-Downtime Deployment Challenge")" \
+    "$(json_escape "production")" \
+    "$(json_escape "$GIT_SHA")" \
+    "$(json_escape "$alert_app_url")" \
+    "$(json_escape "$event")" \
+    "$(json_escape "$status")" \
+    "$(json_escape "$message")")
+
+  if ! curl -fsS -X POST http://127.0.0.1:9001/notify \
+    -H 'Content-Type: application/json' \
+    --data "$payload" >/dev/null; then
+    echo "[warn] failed to send alert: ${event}" >&2
+  fi
+
+  return 0
+}
 
 dump_compose_diagnostics() {
   echo "Deployment failed. Compose service status:"
@@ -117,6 +153,7 @@ cleanup_legacy_container zero-downtime-nginx
 cleanup_legacy_container zero-downtime-frontend
 cleanup_legacy_container zero-downtime-backend
 
+send_alert "deployment_started" "info" "Deployment started for SHA ${GIT_SHA}." || true
 if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
   printf '%s' "$GHCR_TOKEN" | "${DOCKER[@]}" login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 fi
@@ -131,6 +168,7 @@ echo "Restarting nginx to refresh upstream resolution..."
 
 if ./scripts/verify-deployment.sh "$VERIFY_APP_URL"; then
   printf '%s\n' "$GIT_SHA" > "$CURRENT_SHA_FILE"
+  send_alert "deployment_success" "success" "Deployment verified successfully for SHA ${GIT_SHA}." || true
   "${DOCKER[@]}" image prune -f || true
 
   echo "Deployment succeeded. Current deployment is now ${GIT_SHA}."
@@ -139,6 +177,7 @@ fi
 
 printf '%s\n' "$GIT_SHA" > "$FAILED_SHA_FILE"
 echo "Deployment verification failed for ${GIT_SHA}." >&2
+send_alert "deployment_failed" "error" "Deployment failed verification for SHA ${GIT_SHA}; rollback is starting." || true
 dump_compose_diagnostics
 
 rollback_after_failed_deploy || true

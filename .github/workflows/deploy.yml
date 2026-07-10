@@ -4,14 +4,6 @@ on:
   push:
     branches:
       - Main
-    paths:
-      - frontend/**
-      - backend/**
-      - nginx/**
-      - compose/**
-      - scripts/**
-      - .github/workflows/deploy.yml
-  workflow_dispatch:
 
 concurrency:
   group: production-deploy
@@ -25,6 +17,7 @@ env:
   REGISTRY: ghcr.io
   FRONTEND_IMAGE: ghcr.io/jackpac2/zero-downtime-frontend
   BACKEND_IMAGE: ghcr.io/jackpac2/zero-downtime-backend
+  NOTIFIER_IMAGE: ghcr.io/jackpac2/zero-downtime-notifier
   PROD_COMPOSE_FILE: compose/docker-compose.prod.yml
   PROD_COMPOSE_PROJECT: zero-downtime
 
@@ -53,6 +46,7 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             backend/package-lock.json
+            notifier/package-lock.json
 
       - name: Validate frontend
         working-directory: frontend
@@ -69,6 +63,14 @@ jobs:
           npm run lint --if-present
           npm test --if-present
           npm run check --if-present
+
+      - name: Validate notifier
+        working-directory: notifier
+        run: |
+          npm ci
+          npm run lint --if-present
+          npm test --if-present
+          node --check src/server.js
 
       - name: Validate production Compose config
         run: IMAGE_TAG="${{ steps.vars.outputs.sha }}" docker compose -p "$PROD_COMPOSE_PROJECT" -f "$PROD_COMPOSE_FILE" config
@@ -117,6 +119,21 @@ jobs:
             org.opencontainers.image.created=${{ steps.vars.outputs.created }}
             org.opencontainers.image.title=zero-downtime-backend
 
+      - name: Build and push notifier image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./notifier
+          push: true
+          tags: |
+            ${{ env.NOTIFIER_IMAGE }}:${{ steps.vars.outputs.sha }}
+            ${{ env.NOTIFIER_IMAGE }}:${{ steps.vars.outputs.short_sha }}
+            ${{ env.NOTIFIER_IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.vars.outputs.sha }}
+            org.opencontainers.image.created=${{ steps.vars.outputs.created }}
+            org.opencontainers.image.title=zero-downtime-notifier
+
       - name: Deploy exact commit to EC2
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -125,6 +142,7 @@ jobs:
           EC2_APP_DIR: ${{ secrets.EC2_APP_DIR }}
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
         run: |
           set -euo pipefail
@@ -141,7 +159,7 @@ jobs:
 
           # The server-side script owns Compose behavior and image deployment.
           ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "cd '$EC2_APP_DIR' && APP_URL=\"http://$EC2_HOST\" EC2_APP_DIR='$EC2_APP_DIR' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' ./scripts/deploy.sh '$DEPLOY_SHA'"
+            "cd '$EC2_APP_DIR' && APP_URL=\"http://$EC2_HOST\" EC2_APP_DIR='$EC2_APP_DIR' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' DISCORD_WEBHOOK_URL='$DISCORD_WEBHOOK_URL' ./scripts/deploy.sh '$DEPLOY_SHA'"
 
       - name: Run post-deployment smoke tests
         env:
@@ -183,6 +201,7 @@ jobs:
             echo "| Short Git SHA | ${{ steps.vars.outputs.short_sha }} |"
             echo "| Frontend image | ${{ env.FRONTEND_IMAGE }}:${{ steps.vars.outputs.sha }} |"
             echo "| Backend image | ${{ env.BACKEND_IMAGE }}:${{ steps.vars.outputs.sha }} |"
+            echo "| Notifier image | ${{ env.NOTIFIER_IMAGE }}:${{ steps.vars.outputs.sha }} |"
             echo "| EC2 host | ${EC2_HOST} |"
             echo "| Production Compose file | ${{ env.PROD_COMPOSE_FILE }} |"
             echo "| Smoke test result | ${{ job.status }} |"
