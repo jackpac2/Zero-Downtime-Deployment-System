@@ -12,11 +12,10 @@ REPO_URL="$2"
 BRANCH="$3"
 
 if [ -d "$APP_DIR/.git" ]; then
-  cd "$APP_DIR"
-  git config core.fileMode false
-  git fetch origin "$BRANCH"
-  git checkout "$BRANCH"
-  git pull --ff-only origin "$BRANCH"
+  # Existing deployment checkouts are deliberately left untouched here.
+  # deploy.sh acquires the shared production lock before fetching, validating,
+  # and checking out the exact requested commit.
+  git -C "$APP_DIR" rev-parse --is-inside-work-tree >/dev/null
   exit 0
 fi
 

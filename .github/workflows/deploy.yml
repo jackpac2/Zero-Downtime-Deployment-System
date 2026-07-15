@@ -75,6 +75,9 @@ jobs:
       - name: Validate production Compose config
         run: IMAGE_TAG="${{ steps.vars.outputs.sha }}" docker compose -p "$PROD_COMPOSE_PROJECT" -f "$PROD_COMPOSE_FILE" config
 
+      - name: Validate deployment safety helpers
+        run: bash scripts/tests/test-deployment-common.sh
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -157,9 +160,16 @@ jobs:
           ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
             "bash -s -- '$EC2_APP_DIR' 'https://github.com/${{ github.repository }}.git' 'Main'" < scripts/ensure-ec2-repo.sh
 
-          # The server-side script owns Compose behavior and image deployment.
+          # Copy the safety-aware launcher from this exact workflow commit. This
+          # avoids depending on an older deploy.sh currently checked out on EC2.
+          tar -czf - scripts/deploy.sh scripts/lib/deployment-common.sh | \
+            ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+              "mkdir -p '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA' && tar -xzf - -C '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA' && chmod u+x '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA/scripts/deploy.sh'"
+
+          # The launcher acquires the server lock, verifies origin/Main, checks
+          # out DEPLOY_SHA, and re-executes deploy.sh from that exact commit.
           ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "cd '$EC2_APP_DIR' && APP_URL=\"http://$EC2_HOST\" EC2_APP_DIR='$EC2_APP_DIR' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' DISCORD_WEBHOOK_URL='$DISCORD_WEBHOOK_URL' ./scripts/deploy.sh '$DEPLOY_SHA'"
+            "APP_URL=\"http://$EC2_HOST\" EC2_APP_DIR='$EC2_APP_DIR' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' DISCORD_WEBHOOK_URL='$DISCORD_WEBHOOK_URL' '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA/scripts/deploy.sh' '$DEPLOY_SHA'"
 
       - name: Run post-deployment smoke tests
         env:
