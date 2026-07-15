@@ -2,10 +2,15 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/lib/deployment-common.sh
+source "${SCRIPT_DIR}/lib/deployment-common.sh"
+
 APP_DIR="${EC2_APP_DIR:-/home/ubuntu/Zero-Downtime-Deployment-System}"
+BRANCH="Main"
 COMPOSE_PROJECT_NAME="zero-downtime"
 COMPOSE_FILE="compose/docker-compose.prod.yml"
-DEPLOY_DIR=".deploy"
+DEPLOY_DIR="${APP_DIR}/.deploy"
 CURRENT_SHA_FILE="${DEPLOY_DIR}/current.sha"
 PREVIOUS_SHA_FILE="${DEPLOY_DIR}/previous.sha"
 ROLLED_BACK_FROM_FILE="${DEPLOY_DIR}/rolled-back-from.sha"
@@ -14,6 +19,9 @@ CURRENT_SHA=""
 VERIFY_APP_URL=""
 
 cd "$APP_DIR"
+
+ensure_deployment_state_dir "$DEPLOY_DIR"
+acquire_deployment_lock "$DEPLOY_DIR"
 
 json_escape() {
   local value="${1:-}"
@@ -58,18 +66,49 @@ fail_rollback() {
   exit 1
 }
 
-if [ ! -f "$PREVIOUS_SHA_FILE" ]; then
-  fail_rollback "Rollback failed: target not found in ${PREVIOUS_SHA_FILE}."
+if ! ROLLBACK_SHA="$(read_deployment_sha_file "$PREVIOUS_SHA_FILE" "Rollback target SHA")"; then
+  fail_rollback "Rollback failed: target in ${PREVIOUS_SHA_FILE} is missing or invalid."
 fi
 
-ROLLBACK_SHA="$(tr -d '[:space:]' < "$PREVIOUS_SHA_FILE")"
+# Run rollback.sh and Compose assets from the rollback target commit. The exact
+# script runs as a child so this safety-aware controller can restore its checkout
+# afterward. The child inherits the already-held flock descriptor and cannot
+# deadlock when deploy.sh starts an automatic rollback.
+if [ "${DEPLOYMENT_ASSET_SHA:-}" != "$ROLLBACK_SHA" ]; then
+  ROLLBACK_CONTROLLER_SHA="$(git rev-parse HEAD)"
+  if ! validate_deployment_sha "$ROLLBACK_CONTROLLER_SHA" "Rollback controller SHA"; then
+    fail_rollback "Rollback failed: the current deployment checkout is invalid."
+  fi
+  if ! prepare_exact_deployment_commit "$APP_DIR" "$ROLLBACK_SHA" "$BRANCH"; then
+    fail_rollback "Rollback failed: exact deployment assets could not be prepared for ${ROLLBACK_SHA}."
+  fi
 
-if [[ ! "$ROLLBACK_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-  fail_rollback "Rollback failed: target in ${PREVIOUS_SHA_FILE} is empty or invalid."
+  if [ ! -x "${APP_DIR}/scripts/rollback.sh" ]; then
+    fail_rollback "Rollback failed: scripts/rollback.sh is unavailable at ${ROLLBACK_SHA}."
+  fi
+
+  if DEPLOYMENT_ASSET_SHA="$ROLLBACK_SHA" "${APP_DIR}/scripts/rollback.sh"; then
+    exact_rollback_exit=0
+  else
+    exact_rollback_exit=$?
+  fi
+
+  if ! git checkout --detach "$ROLLBACK_CONTROLLER_SHA" >/dev/null; then
+    echo "[warn] rollback finished but the deployment checkout could not be restored to ${ROLLBACK_CONTROLLER_SHA}." >&2
+    exit 1
+  fi
+
+  exit "$exact_rollback_exit"
+fi
+
+if ! verify_exact_deployment_commit "$APP_DIR" "$ROLLBACK_SHA" "$BRANCH"; then
+  fail_rollback "Rollback failed: deployment assets do not match ${ROLLBACK_SHA}."
 fi
 
 if [ -f "$CURRENT_SHA_FILE" ]; then
-  CURRENT_SHA="$(tr -d '[:space:]' < "$CURRENT_SHA_FILE")"
+  if ! CURRENT_SHA="$(read_deployment_sha_file "$CURRENT_SHA_FILE" "Current deployment SHA")"; then
+    fail_rollback "Rollback failed: current deployment state is invalid."
+  fi
 fi
 
 if docker info >/dev/null 2>&1; then
@@ -82,12 +121,24 @@ fi
 
 COMPOSE=("${DOCKER[@]}" compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE")
 
+if [ ! -f "$COMPOSE_FILE" ] || [ ! -x "./scripts/verify-deployment.sh" ]; then
+  fail_rollback "Rollback failed: required deployment assets are unavailable at ${ROLLBACK_SHA}."
+fi
+
+if ! "${DOCKER[@]}" compose version >/dev/null 2>&1; then
+  fail_rollback "Rollback failed: Docker Compose v2 is required but unavailable."
+fi
+
 if [ -n "${APP_URL:-}" ]; then
   VERIFY_APP_URL="$APP_URL"
 elif [ -n "${EC2_HOST:-}" ]; then
   VERIFY_APP_URL="http://${EC2_HOST}"
 else
   fail_rollback "Rollback failed: APP_URL or EC2_HOST is required for deployment verification."
+fi
+
+if ! "${COMPOSE[@]}" config --quiet; then
+  fail_rollback "Rollback failed: production Compose configuration is invalid at ${ROLLBACK_SHA}."
 fi
 
 print_diagnostics() {

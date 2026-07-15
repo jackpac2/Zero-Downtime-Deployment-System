@@ -2,17 +2,23 @@
 
 set -euo pipefail
 
-if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/lib/deployment-common.sh
+source "${SCRIPT_DIR}/lib/deployment-common.sh"
+
+if [ "$#" -ne 1 ]; then
   echo "Usage: $0 <git-sha>" >&2
   exit 1
 fi
 
-GIT_SHA="$1"
+validate_deployment_sha "${1-}" "Deployment SHA" || exit 1
+
+GIT_SHA="${1,,}"
 APP_DIR="${EC2_APP_DIR:-/home/ubuntu/Zero-Downtime-Deployment-System}"
 BRANCH="Main"
 COMPOSE_PROJECT_NAME="zero-downtime"
 COMPOSE_FILE="compose/docker-compose.prod.yml"
-DEPLOY_DIR=".deploy"
+DEPLOY_DIR="${APP_DIR}/.deploy"
 CURRENT_SHA_FILE="${DEPLOY_DIR}/current.sha"
 PREVIOUS_SHA_FILE="${DEPLOY_DIR}/previous.sha"
 FAILED_SHA_FILE="${DEPLOY_DIR}/failed.sha"
@@ -26,22 +32,25 @@ DEPLOYMENT_STAGE="setup"
 
 cd "$APP_DIR"
 
-git config core.fileMode false
-git fetch origin "$BRANCH"
-git checkout "$BRANCH"
-git pull --ff-only origin "$BRANCH"
+ensure_deployment_state_dir "$DEPLOY_DIR"
+acquire_deployment_lock "$DEPLOY_DIR"
 
-mkdir -p "$DEPLOY_DIR"
+# The workflow may invoke a bootstrap copy of this script. Under the shared lock,
+# move the deployment checkout to the requested Main commit and then replace this
+# process with deploy.sh from that exact commit. The lock descriptor is inherited.
+if [ "${DEPLOYMENT_ASSET_SHA:-}" != "$GIT_SHA" ]; then
+  prepare_exact_deployment_commit "$APP_DIR" "$GIT_SHA" "$BRANCH"
 
-OLD_CURRENT_SHA=""
-if [ -f "$CURRENT_SHA_FILE" ]; then
-  OLD_CURRENT_SHA="$(tr -d '[:space:]' < "$CURRENT_SHA_FILE")"
+  if [ ! -f "${APP_DIR}/scripts/lib/deployment-common.sh" ]; then
+    echo "Requested commit predates exact-commit deployment support: ${GIT_SHA}" >&2
+    exit 1
+  fi
+
+  export DEPLOYMENT_ASSET_SHA="$GIT_SHA"
+  exec "${APP_DIR}/scripts/deploy.sh" "$GIT_SHA"
 fi
 
-if [ -n "$OLD_CURRENT_SHA" ]; then
-  printf '%s\n' "$OLD_CURRENT_SHA" > "$PREVIOUS_SHA_FILE"
-  ROLLBACK_TARGET_READY=true
-fi
+verify_exact_deployment_commit "$APP_DIR" "$GIT_SHA" "$BRANCH"
 
 export IMAGE_TAG="$GIT_SHA"
 export DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
@@ -57,6 +66,21 @@ fi
 
 COMPOSE=("${DOCKER[@]}" compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE")
 
+if [ ! -f "$COMPOSE_FILE" ]; then
+  echo "Production Compose file not found at requested commit: ${COMPOSE_FILE}" >&2
+  exit 1
+fi
+
+if [ ! -x "./scripts/verify-deployment.sh" ] || [ ! -x "./scripts/rollback.sh" ]; then
+  echo "Required deployment scripts are missing or not executable at ${GIT_SHA}." >&2
+  exit 1
+fi
+
+if ! "${DOCKER[@]}" compose version >/dev/null 2>&1; then
+  echo "Docker Compose v2 is required but is not available." >&2
+  exit 1
+fi
+
 if [ -n "${APP_URL:-}" ]; then
   VERIFY_APP_URL="$APP_URL"
 elif [ -n "${EC2_HOST:-}" ]; then
@@ -65,6 +89,23 @@ else
   echo "APP_URL or EC2_HOST is required for Phase 7 deployment verification." >&2
   echo "Set APP_URL to the public app URL or EC2_HOST to the public EC2 hostname/IP." >&2
   exit 1
+fi
+
+if ! "${COMPOSE[@]}" config --quiet; then
+  echo "Production Compose configuration is invalid at ${GIT_SHA}." >&2
+  exit 1
+fi
+
+OLD_CURRENT_SHA=""
+if [ -f "$CURRENT_SHA_FILE" ]; then
+  OLD_CURRENT_SHA="$(read_deployment_sha_file "$CURRENT_SHA_FILE" "Current deployment SHA")"
+fi
+
+# All argument, lock, repository, Docker, and configuration checks have passed.
+# State mutation begins here, immediately before production-changing operations.
+if [ -n "$OLD_CURRENT_SHA" ]; then
+  printf '%s\n' "$OLD_CURRENT_SHA" > "$PREVIOUS_SHA_FILE"
+  ROLLBACK_TARGET_READY=true
 fi
 
 json_escape() {

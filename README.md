@@ -78,17 +78,44 @@ The script runs on EC2 from:
 
 It performs these steps:
 
-- Pulls the latest `Main` branch files.
-- Exports `IMAGE_TAG=<git-sha>`.
-- Creates `.deploy/` if needed.
-- Copies `.deploy/current.sha` to `.deploy/previous.sha` before deployment.
+- Requires a full 40-character hexadecimal Git SHA.
+- Creates and validates `.deploy/`, then acquires `.deploy/deployment.lock` with `flock`.
+- Fetches `origin/Main`, verifies that the requested commit belongs to its history, and refuses a dirty deployment checkout.
+- Checks out the requested commit in detached-HEAD mode and re-executes `deploy.sh` from that exact commit.
+- Exports `IMAGE_TAG=<git-sha>`, so the deployment scripts, Compose file, frontend, backend, and notifier all use the same commit.
+- Copies a valid `.deploy/current.sha` to `.deploy/previous.sha` only after preflight checks pass.
 - Runs `docker compose -p zero-downtime -f compose/docker-compose.prod.yml pull`.
-- Runs `docker compose -p zero-downtime -f compose/docker-compose.prod.yml up -d --remove-orphans`.
+- Runs `docker compose -p zero-downtime -f compose/docker-compose.prod.yml up -d --remove-orphans --wait`.
+- Verifies the public frontend and `/api/health`, with automatic rollback on deployment failure.
 - Removes unused old images with `docker image prune -f`.
 - Shows running containers with `docker ps`.
-- Writes `.deploy/current.sha` only after Compose deployment succeeds.
+- Writes `.deploy/current.sha` only after verification succeeds.
 
-Health checks, automatic rollback, and alerts are intentionally not implemented yet. The `.deploy/current.sha` and `.deploy/previous.sha` files only prepare the version tracking foundation for Phase 7.
+This remains an in-place deployment. Blue/Green environments and traffic switching are not implemented.
+
+## Deployment Safety Prerequisites
+
+`scripts/lib/deployment-common.sh` contains the SHA, lock, and exact-commit checks shared by deployment and rollback.
+
+- Deployment and rollback SHAs must match `^[0-9a-fA-F]{40}$`. Short, long, whitespace-containing, empty, and non-hexadecimal values are rejected before Docker or state mutation.
+- Deployments and rollbacks share `.deploy/deployment.lock`. Lock acquisition is fail-fast: a second operation exits clearly instead of waiting or overlapping.
+- The lock file may remain after a crash, but that does not keep the system locked. The kernel releases the `flock` automatically when the owning process exits.
+- Automatic rollback inherits the deployment's open lock descriptor, so it remains inside the same protected operation and does not deadlock.
+- The workflow copies a safety-aware launcher from its own commit into `.deploy/bootstrap/<sha>/`. The launcher acquires the lock before fetching and checking out the requested SHA, then re-executes the repository's `deploy.sh` at that SHA.
+- Queued Actions runs deploy their own SHA in turn. A later run fetches and deliberately checks out its requested commit rather than silently using the newest `Main` checkout.
+- Commits deployed through the new workflow must contain the safety helper. Older commits remain valid rollback targets because the safety-aware rollback controller validates and checks out the target before running its exact rollback script under the inherited lock.
+
+Manual deployment still uses:
+
+```bash
+./scripts/deploy.sh <full-40-character-git-sha>
+```
+
+Manual rollback still uses the validated SHA stored in `.deploy/previous.sha`:
+
+```bash
+./scripts/rollback.sh
+```
 
 ## Ignored Deployment State
 
@@ -98,20 +125,24 @@ It may contain:
 
 - `current.sha`
 - `previous.sha`
+- `failed.sha`
+- `rolled-back-from.sha`
+- `deployment.lock`
 
 These files should stay on EC2 and should not be committed to GitHub.
 
-## Phase 6 CI/CD Flow
+## Production CI/CD Flow
 
-The intended Phase 6 production flow is:
+The production flow is:
 
 1. Developer pushes to `Main`.
-2. GitHub Actions builds frontend and backend Docker images.
+2. GitHub Actions validates the safety helpers and builds frontend, backend, and notifier Docker images.
 3. GitHub Actions tags images with the full Git SHA, short Git SHA, and `latest`.
 4. GitHub Actions pushes images to GHCR.
 5. GitHub Actions connects to EC2 over SSH.
-6. GitHub Actions runs `./scripts/deploy.sh <git-sha>`.
-7. EC2 pulls and starts the exact full-SHA image versions.
+6. GitHub Actions copies and runs the exact-commit deployment launcher with `<git-sha>`.
+7. EC2 validates and checks out that commit under the shared lock.
+8. EC2 pulls, starts, verifies, and records the exact full-SHA image versions.
 
 ## Required GitHub Secrets
 
@@ -141,6 +172,7 @@ The EC2 instance should already have:
 - Repository cloned at `/home/ubuntu/Zero-Downtime-Deployment-System`
 - Docker installed
 - Docker Compose v2 installed and available as `docker compose`
+- Linux `flock` installed (normally provided by the `util-linux` package)
 - Port `80` open in the EC2 security group
 - SSH access configured for the private key stored in `EC2_SSH_KEY`
 
@@ -178,7 +210,7 @@ The deployment workflow validates the app before publishing images:
 - Backend: `npm ci`, `npm run lint --if-present`, `npm test --if-present`, and `npm run check --if-present`.
 - Production Compose: `IMAGE_TAG=<git-sha> docker compose -p zero-downtime -f compose/docker-compose.prod.yml config`.
 
-The workflow also uses Docker Buildx cache, OCI image labels, production deployment concurrency, the `production` GitHub Environment, path filters, post-deployment smoke tests, and a GitHub Actions deployment summary.
+The workflow also uses Docker Buildx cache, OCI image labels, production deployment concurrency, the `production` GitHub Environment, post-deployment smoke tests, and a GitHub Actions deployment summary.
 
 The smoke tests check:
 
@@ -187,15 +219,15 @@ curl -f http://$EC2_HOST
 curl -f http://$EC2_HOST/api/health
 ```
 
-These smoke tests are simple Phase 6 checks only. Full health-check retry logic, rollback, alerts, and blue-green deployment remain Phase 7 work.
+The server-side verification script also retries these checks and starts automatic rollback when an in-place deployment fails. Blue/Green deployment is not implemented.
 
 ## EC2 Repo Bootstrap
 
 The deploy workflow now runs `scripts/ensure-ec2-repo.sh` over SSH before it runs `scripts/deploy.sh`.
 
-The bootstrap script checks whether `/home/ubuntu/Zero-Downtime-Deployment-System/.git` exists for the `ubuntu` user. If it exists, the script fetches and fast-forwards the `Main` branch. If it does not exist and the target directory is empty or missing, the script clones `https://github.com/jackpac2/Zero-Downtime-Deployment-System.git` into the ubuntu user's app directory.
+The bootstrap script checks whether `/home/ubuntu/Zero-Downtime-Deployment-System/.git` exists for the `ubuntu` user. If it exists, the script validates the checkout but deliberately leaves it unchanged. If it does not exist and the target directory is empty or missing, the script clones `https://github.com/jackpac2/Zero-Downtime-Deployment-System.git` into the ubuntu user's app directory.
 
-This fixes the case where the repository was cloned under the root account but not under `/home/ubuntu`. EC2 still does not build images; after the repo exists for `ubuntu`, `scripts/deploy.sh <git-sha>` pulls and runs the exact GHCR images for that commit.
+The safety-aware deployment launcher performs fetching, allowed-history validation, and exact checkout only after acquiring the production lock. EC2 still does not build images; it pulls and runs the exact GHCR images for the requested commit.
 
 ## Compose Project Naming
 
