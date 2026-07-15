@@ -9,6 +9,8 @@ The application source code is shared between development and production:
 - `nginx/` contains the Nginx reverse proxy configuration.
 - `compose/docker-compose.dev.yml` is for local development and manual testing.
 - `compose/docker-compose.prod.yml` is for production deployment on EC2.
+- `compose/docker-compose.router.yml` prepares the stable Nginx and notifier project.
+- `compose/docker-compose.app.yml` prepares the separately managed frontend and backend project.
 - `scripts/ensure-ec2-repo.sh` bootstraps the repo into the ubuntu user's EC2 app directory if it is missing.
 - `scripts/deploy.sh` is the EC2 deployment entrypoint.
 - `.github/workflows/deploy.yml` is the GitHub Actions workflow.
@@ -54,6 +56,54 @@ Production exposes:
 
 ```yaml
 80:80
+```
+
+## Prepared Stable Router Topology
+
+The repository contains a prepared split between the stable control plane and the application lifecycle:
+
+```text
+                 Port 80
+                    |
+       zero-downtime-router project
+            Nginx + notifier
+                    |
+       zero-downtime-router network
+          app-frontend / app-backend
+                    |
+         zero-downtime-app project
+           frontend + backend
+```
+
+`compose/docker-compose.router.yml` contains only public Nginx and the deployment notifier. Nginx owns port `80`, mounts `nginx/router.conf` read-only, and provides `/router-health` without contacting either application service. The notifier retains `127.0.0.1:9001:4000`, its webhook environment variable, and its health check.
+
+`compose/docker-compose.app.yml` contains only frontend and backend. Both remain on the application's project-local default network. They also join the external `zero-downtime-router` network with the unique aliases `app-frontend` and `app-backend`. Neither service publishes a host port.
+
+The external network must be created once before either prepared project is started:
+
+```bash
+docker network create zero-downtime-router
+```
+
+Because the network is declared `external`, normal `docker compose down` operations for either project do not delete it.
+
+The prepared router uses Docker's embedded DNS resolver at `127.0.0.11`. Its `proxy_pass` targets contain variables, so Nginx resolves `app-frontend` and `app-backend` while handling requests instead of resolving each name only when Nginx starts. Results are cached for at most 10 seconds. Recreating an application container can therefore give its alias a new IP without requiring a router restart. While an alias is temporarily unavailable, proxied application requests return an upstream error, but `/router-health` continues returning `200`; Nginx retries DNS resolution and recovers when the alias is available again.
+
+These files are preparation artifacts only. Production deployment and rollback still use `compose/docker-compose.prod.yml`, the original `nginx/nginx.conf`, and the single `zero-downtime` Compose project. Blue/Green environments, active-color state, traffic switching, and production migration are not implemented. A separate controlled migration task is required.
+
+Validate the prepared topology without starting production services:
+
+```bash
+export IMAGE_TAG=0000000000000000000000000000000000000000
+export DISCORD_WEBHOOK_URL=""
+
+docker compose -p zero-downtime -f compose/docker-compose.prod.yml config
+docker compose -p zero-downtime-app -f compose/docker-compose.app.yml config
+docker compose -p zero-downtime-router -f compose/docker-compose.router.yml config
+bash scripts/tests/test-router-topology.sh
+docker run --rm \
+  --volume "$PWD/nginx/router.conf:/etc/nginx/conf.d/default.conf:ro" \
+  nginx:1.27-alpine nginx -t
 ```
 
 ## Why Production Pulls Images
