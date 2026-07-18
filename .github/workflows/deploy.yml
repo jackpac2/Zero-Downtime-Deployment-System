@@ -31,6 +31,20 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Validate stable router migration shell syntax
+        run: |
+          bash -n scripts/migrate-to-stable-router.sh
+          bash -n scripts/lib/*.sh
+          bash -n scripts/tests/*.sh
+
+      - name: Test stable router migration
+        run: bash scripts/tests/test-stable-router-migration.sh
+
+      - name: Validate Git diff formatting
+        run: git diff --check HEAD^ HEAD
 
       - name: Prepare image metadata
         id: vars
