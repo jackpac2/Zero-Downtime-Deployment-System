@@ -5,6 +5,7 @@
 
 MIGRATION_PHASE="not-started"
 MIGRATION_LEGACY_STOPPED=false
+MIGRATION_PREPARATION_STARTED=false
 
 migration_run_step() {
     MIGRATION_PHASE="$1"
@@ -20,17 +21,17 @@ migration_handle_failure() {
 
     if [ "$MIGRATION_LEGACY_STOPPED" = true ]; then
         migration_stop_new_router || true
-        migration_stop_new_app || true
+        migration_stop_new_application || true
 
         if migration_restore_legacy && migration_verify_restored_legacy; then
-            migration_remove_created_network_if_safe || true
+            remove_created_network_if_safe || true
             migration_notify "migration_legacy_restored" "$failed_phase" || true
         else
             migration_notify "migration_manual_recovery_required" "$failed_phase" || true
             migration_print_manual_recovery "$failed_phase" || true
         fi
-    else
-        migration_cleanup_prepared_resources || true
+    elif [ "$MIGRATION_PREPARATION_STARTED" = true ]; then
+        migration_cleanup_before_cutover || true
     fi
 }
 
@@ -41,6 +42,7 @@ run_stable_router_migration() {
     }
     migration_notify "migration_preflight_complete" "preflight" || true
 
+    MIGRATION_PREPARATION_STARTED=true
     migration_run_step "network-preparation" migration_prepare_network || {
         migration_handle_failure "network-preparation"
         return 1
@@ -51,12 +53,12 @@ run_stable_router_migration() {
         return 1
     }
 
-    migration_run_step "application-startup" migration_start_app || {
+    migration_run_step "application-startup" migration_start_application || {
         migration_handle_failure "application-startup"
         return 1
     }
 
-    migration_run_step "application-verification" migration_verify_app || {
+    migration_run_step "application-verification" migration_verify_application || {
         migration_handle_failure "application-verification"
         return 1
     }
@@ -71,7 +73,7 @@ run_stable_router_migration() {
     }
     migration_notify "migration_legacy_stopped" "legacy-shutdown" || true
 
-    migration_run_step "port-release-verification" migration_verify_ports_released || {
+    migration_run_step "port-release-verification" migration_verify_cutover_ports || {
         migration_handle_failure "port-release-verification"
         return 1
     }

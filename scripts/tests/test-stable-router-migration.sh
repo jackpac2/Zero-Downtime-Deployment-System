@@ -70,6 +70,7 @@ reset_case() {
   rm -f "$TOPOLOGY_FILE" "${TOPOLOGY_FILE}.tmp"
   MIGRATION_PHASE="not-started"
   MIGRATION_LEGACY_STOPPED=false
+  MIGRATION_PREPARATION_STARTED=false
 }
 
 assert_contains() {
@@ -110,6 +111,36 @@ run_expected_failure() {
   pass "$name"
 }
 
+run_expected_preflight_failure() {
+  local name="$1"
+
+  reset_case preflight
+  if run_stable_router_migration >/dev/null 2>&1; then
+    fail "$name should fail"
+  fi
+
+  expected_order=$(cat <<'EOF'
+preflight
+diagnostics
+EOF
+)
+  if [ "$(cat "$LOG_FILE")" != "$expected_order" ]; then
+    fail "$name command ordering"
+  fi
+
+  for operation in \
+    cleanup-pre-cutover \
+    stop-legacy \
+    start-router \
+    commit-state \
+    restore-legacy; do
+    assert_not_contains "$operation"
+  done
+  assert_not_contains success
+  [ ! -f "$TOPOLOGY_FILE" ] || fail "$name wrote success topology state"
+  pass "$name"
+}
+
 # The real entry point must reject a short SHA before it can reach Docker or state.
 if EC2_APP_DIR="$TEST_ROOT/does-not-exist" bash "$MIGRATION_SCRIPT" abcdef1 >/dev/null 2>&1; then
   fail "invalid SHA preflight"
@@ -124,7 +155,7 @@ for scenario in \
   "Nginx validation failure" \
   "unexpected dirty checkout" \
   "lock or third-party port preflight"; do
-  run_expected_failure "$scenario" preflight false
+  run_expected_preflight_failure "$scenario"
 done
 
 run_expected_failure "image pull failure" pull false
