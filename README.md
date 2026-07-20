@@ -163,6 +163,7 @@ Manual deployment still uses:
 ./scripts/deploy.sh <full-40-character-git-sha>
 ```
 
+
 Manual rollback still uses the validated SHA stored in `.deploy/previous.sha`:
 
 ```bash
@@ -193,6 +194,18 @@ During stable-router activation, a push or merge to `Main`:
 4. Does not SSH to EC2, deploy the legacy project, or run migration.
 
 This temporary guard is required because `deploy.sh` and `rollback.sh` still operate only on the legacy `zero-downtime` project. The old automatic step could otherwise recreate Nginx on port 80 and the notifier on port 9001 after migration. Normal stable-router deployment and rollback are the next phase; automatic EC2 mutation must remain paused until that work is complete.
+## Production CI/CD Flow
+
+The production flow is:
+
+1. Developer pushes to `Main`.
+2. GitHub Actions validates the safety helpers and builds frontend, backend, and notifier Docker images.
+3. GitHub Actions tags images with the full Git SHA, short Git SHA, and `latest`.
+4. GitHub Actions pushes images to GHCR.
+5. GitHub Actions connects to EC2 over SSH.
+6. GitHub Actions copies and runs the exact-commit deployment launcher with `<git-sha>`.
+7. EC2 validates and checks out that commit under the shared lock.
+8. EC2 pulls, starts, verifies, and records the exact full-SHA image versions.
 
 ## Required GitHub Secrets
 
@@ -273,6 +286,13 @@ The manual workflow prepares a fresh Ubuntu host, but the instance must already 
 - An SSH deployment user, normally `ubuntu`, with passwordless sudo for package, service, and group administration.
 - SSH access configured for `EC2_SSH_KEY` and matching the pinned `EC2_KNOWN_HOSTS` entry.
 - Ports 22 and 80 allowed as described above.
+- Ubuntu user: `ubuntu`
+- Repository cloned at `/home/ubuntu/Zero-Downtime-Deployment-System`
+- Docker installed
+- Docker Compose v2 installed and available as `docker compose`
+- Linux `flock` installed (normally provided by the `util-linux` package)
+- Port `80` open in the EC2 security group
+- SSH access configured for the private key stored in `EC2_SSH_KEY`
 
 Useful checks on EC2:
 
@@ -310,6 +330,7 @@ The deployment workflow validates the app before publishing images:
 
 The workflow also uses Docker Buildx cache, OCI image labels, production concurrency, the `production` GitHub Environment, manual stable-router verification, and a GitHub Actions summary.
 
+
 The manual path checks:
 
 ```bash
@@ -318,6 +339,7 @@ curl -f http://$EC2_HOST/api/health
 ```
 
 The server-side verification script retries these checks and starts automatic rollback when the initial legacy deployment fails. Blue/Green deployment is not implemented.
+
 
 ## EC2 Repo Bootstrap
 

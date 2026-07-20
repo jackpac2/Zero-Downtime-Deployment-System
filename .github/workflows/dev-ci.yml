@@ -107,6 +107,9 @@ jobs:
         id: diff_check
         run: git diff --check HEAD^ HEAD
 
+      - name: Validate deployment safety helpers
+        run: bash scripts/tests/test-deployment-common.sh
+
       - name: Validate Docker image builds
         id: docker_build_validation
         run: |
