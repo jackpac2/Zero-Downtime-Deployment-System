@@ -12,7 +12,9 @@ The application source code is shared between development and production:
 - `compose/docker-compose.router.yml` prepares the stable Nginx and notifier project.
 - `compose/docker-compose.app.yml` prepares the separately managed frontend and backend project.
 - `scripts/ensure-ec2-repo.sh` bootstraps the repo into the ubuntu user's EC2 app directory if it is missing.
+- `scripts/bootstrap-ec2-host.sh` idempotently installs Ubuntu prerequisites and configures non-sudo Docker access.
 - `scripts/deploy.sh` is the EC2 deployment entrypoint.
+- `scripts/migrate-to-stable-router.sh` performs the one-time legacy-to-stable-router migration.
 - `.github/workflows/deploy.yml` is the GitHub Actions workflow.
 
 There are no separate `dev/` and `prod/` app folders. Environment-specific behavior lives in Compose files and scripts, while the actual application code stays shared.
@@ -89,7 +91,7 @@ Because the network is declared `external`, normal `docker compose down` operati
 
 The prepared router uses Docker's embedded DNS resolver at `127.0.0.11`. Its `proxy_pass` targets contain variables, so Nginx resolves `app-frontend` and `app-backend` while handling requests instead of resolving each name only when Nginx starts. Results are cached for at most 10 seconds. Recreating an application container can therefore give its alias a new IP without requiring a router restart. While an alias is temporarily unavailable, proxied application requests return an upstream error, but `/router-health` continues returning `200`; Nginx retries DNS resolution and recovers when the alias is available again.
 
-These files are preparation artifacts only. Production deployment and rollback still use `compose/docker-compose.prod.yml`, the original `nginx/nginx.conf`, and the single `zero-downtime` Compose project. Blue/Green environments, active-color state, traffic switching, and production migration are not implemented. A separate controlled migration task is required.
+Production deployment and rollback still use `compose/docker-compose.prod.yml`, the original `nginx/nginx.conf`, and the single `zero-downtime` Compose project. The split files are activated only by the one-time manually dispatched migration. Normal stable-router deployment, stable-router rollback, Blue/Green environments, active-color state, and traffic switching are not implemented.
 
 Validate the prepared topology without starting production services:
 
@@ -181,18 +183,16 @@ It may contain:
 
 These files should stay on EC2 and should not be committed to GitHub.
 
-## Production CI/CD Flow
+## Production CI/CD Transition Flow
 
-The production flow is:
+During stable-router activation, a push or merge to `Main`:
 
-1. Developer pushes to `Main`.
-2. GitHub Actions validates the safety helpers and builds frontend, backend, and notifier Docker images.
-3. GitHub Actions tags images with the full Git SHA, short Git SHA, and `latest`.
-4. GitHub Actions pushes images to GHCR.
-5. GitHub Actions connects to EC2 over SSH.
-6. GitHub Actions copies and runs the exact-commit deployment launcher with `<git-sha>`.
-7. EC2 validates and checks out that commit under the shared lock.
-8. EC2 pulls, starts, verifies, and records the exact full-SHA image versions.
+1. Validates the application, scripts, Compose files, Nginx configuration, migration transaction, and bootstrap safety tests.
+2. Builds and publishes frontend, backend, and notifier images tagged with the full SHA, short SHA, and `latest`.
+3. Prints that EC2 deployment is temporarily manual.
+4. Does not SSH to EC2, deploy the legacy project, or run migration.
+
+This temporary guard is required because `deploy.sh` and `rollback.sh` still operate only on the legacy `zero-downtime` project. The old automatic step could otherwise recreate Nginx on port 80 and the notifier on port 9001 after migration. Normal stable-router deployment and rollback are the next phase; automatic EC2 mutation must remain paused until that work is complete.
 
 ## Required GitHub Secrets
 
@@ -203,28 +203,76 @@ Required repository secrets:
 | `EC2_HOST` | Your EC2 public DNS name or public IP address |
 | `EC2_USER` | `ubuntu` |
 | `EC2_SSH_KEY` | Private SSH key that can connect to the EC2 instance |
-| `EC2_APP_DIR` | `/home/ubuntu/Zero-Downtime-Deployment-System` |
+| `EC2_KNOWN_HOSTS` | Pinned OpenSSH `known_hosts` entry for `EC2_HOST`, verified out of band |
+
+`EC2_APP_DIR` is optional. If empty or unset, every bootstrap step uses exactly `/home/ubuntu/Zero-Downtime-Deployment-System`.
 
 Optional secrets for private GHCR packages:
 
 | Secret | Purpose |
 | --- | --- |
+| `EC2_APP_DIR` | Custom absolute checkout path; defaults to `/home/ubuntu/Zero-Downtime-Deployment-System` |
 | `GHCR_USERNAME` | GitHub username used by EC2 for GHCR login |
 | `GHCR_TOKEN` | GitHub Personal Access Token with package read access |
+| `DISCORD_WEBHOOK_URL` | Webhook used by the notifier; may be empty |
 
 If the GHCR packages are public, EC2 does not need GHCR login. If they are private, store a GitHub Personal Access Token with package read access as `GHCR_TOKEN`.
 
+## One-Time EC2 Bootstrap and Stable-Router Migration
+
+The one-time path is manual because it changes production topology while the normal deploy and rollback scripts are still legacy-only. In GitHub Actions, open **Build and Deploy**, choose **Run workflow** for the intended `Main` commit, enable `bootstrap_stable_router`, and start the run. A dispatch with the input disabled only validates, builds, and publishes images.
+
+The EC2 security group must allow SSH port 22 from the permitted source and public HTTP port 80. Port 9001 must not be public; the notifier remains bound to `127.0.0.1` and is checked over SSH.
+
+The bootstrap helper installs missing Git, curl, CA certificates, GnuPG, `util-linux` (`flock`), Docker Engine from Docker's signed official Ubuntu apt repository, and Docker Compose v2. It does not upgrade unrelated packages or reboot. It enables Docker and adds the deployment user to the `docker` group if needed. That SSH session ends, and a fresh connection must pass `docker info` and `docker compose version` without `sudo` before repository or production mutation.
+
+The workflow prints the resolved application directory once, creates its parent for the deployment user, runs `ensure-ec2-repo.sh`, and uses `deployment-common.sh` to prepare and verify the exact workflow SHA from `origin/Main` under `flock`.
+
+It reads `.deploy/topology` as plain text:
+
+- No marker means fresh or legacy. The workflow calls `deploy.sh`, verifies the combined `zero-downtime` project and `.deploy/current.sha`, then calls `migrate-to-stable-router.sh`.
+- Exactly `stable-router` means migration already completed. It skips legacy deployment and migration, then verifies the application and router projects, shared network, health endpoints, exact legacy-project absence, and image revision labels.
+- Any other value fails before production mutation.
+
+Legacy is deployed first because migration preflight requires a healthy combined stack whose `current.sha` matches the requested image SHA. `deploy.sh` continues to own legacy Compose, verification, and rollback. The migration script owns network creation, application preparation, legacy shutdown, router startup, transaction cleanup, legacy restoration, and the atomic topology marker.
+
+If migration fails before cutover, it cleans prepared resources. If it fails after legacy shutdown, it stops new resources and attempts to restore and verify legacy. The workflow remains failed even if restoration succeeds. A final-verification failure produces safe status diagnostics without broad workflow cleanup.
+
+Repeated manual runs are idempotent: a healthy `stable-router` marker selects verification-only behavior. The marker prevents manual remigration, while the push guard prevents automatic legacy recreation. Do not manually run legacy `deploy.sh` or `rollback.sh` after migration; stable-router-aware versions are the next phase.
+
+Final EC2 checks:
+
+```bash
+cd /home/ubuntu/Zero-Downtime-Deployment-System
+export IMAGE_TAG="$(tr -d '[:space:]' < .deploy/current.sha)"
+docker compose -p zero-downtime-app -f compose/docker-compose.app.yml ps
+docker compose -p zero-downtime-router -f compose/docker-compose.router.yml ps
+docker network inspect zero-downtime-router
+curl -fsS http://localhost/router-health
+curl -fsS http://localhost/
+curl -fsS http://localhost/api/health
+curl -fsS http://127.0.0.1:9001/health
+test "$(tr -d '[:space:]' < .deploy/topology)" = stable-router
+test -z "$(docker ps -q --filter label=com.docker.compose.project=zero-downtime)"
+```
+
+Operator runbook:
+
+1. Merge to `Main`.
+2. Confirm validation, exact-SHA builds, and GHCR publication succeed, and confirm the push summary says EC2 mutation was skipped.
+3. Verify `EC2_KNOWN_HOSTS` and the required secrets, then manually dispatch **Build and Deploy** with `bootstrap_stable_router=true` for that commit.
+4. Monitor prerequisite installation, the fresh-session Docker check, exact-commit preparation, legacy deployment, migration, and final verification.
+5. Confirm the summary reports `stable-router` and all health checks passed.
+
+This is not true Blue/Green deployment. There are no blue/green environments, active-color state, or traffic-switching controls.
+
 ## Required EC2 Setup
 
-The EC2 instance should already have:
+The manual workflow prepares a fresh Ubuntu host, but the instance must already have:
 
-- Ubuntu user: `ubuntu`
-- Repository cloned at `/home/ubuntu/Zero-Downtime-Deployment-System`
-- Docker installed
-- Docker Compose v2 installed and available as `docker compose`
-- Linux `flock` installed (normally provided by the `util-linux` package)
-- Port `80` open in the EC2 security group
-- SSH access configured for the private key stored in `EC2_SSH_KEY`
+- An SSH deployment user, normally `ubuntu`, with passwordless sudo for package, service, and group administration.
+- SSH access configured for `EC2_SSH_KEY` and matching the pinned `EC2_KNOWN_HOSTS` entry.
+- Ports 22 and 80 allowed as described above.
 
 Useful checks on EC2:
 
@@ -260,20 +308,20 @@ The deployment workflow validates the app before publishing images:
 - Backend: `npm ci`, `npm run lint --if-present`, `npm test --if-present`, and `npm run check --if-present`.
 - Production Compose: `IMAGE_TAG=<git-sha> docker compose -p zero-downtime -f compose/docker-compose.prod.yml config`.
 
-The workflow also uses Docker Buildx cache, OCI image labels, production deployment concurrency, the `production` GitHub Environment, post-deployment smoke tests, and a GitHub Actions deployment summary.
+The workflow also uses Docker Buildx cache, OCI image labels, production concurrency, the `production` GitHub Environment, manual stable-router verification, and a GitHub Actions summary.
 
-The smoke tests check:
+The manual path checks:
 
 ```bash
 curl -f http://$EC2_HOST
 curl -f http://$EC2_HOST/api/health
 ```
 
-The server-side verification script also retries these checks and starts automatic rollback when an in-place deployment fails. Blue/Green deployment is not implemented.
+The server-side verification script retries these checks and starts automatic rollback when the initial legacy deployment fails. Blue/Green deployment is not implemented.
 
 ## EC2 Repo Bootstrap
 
-The deploy workflow now runs `scripts/ensure-ec2-repo.sh` over SSH before it runs `scripts/deploy.sh`.
+The manual bootstrap workflow runs `scripts/ensure-ec2-repo.sh` over SSH before it runs `scripts/deploy.sh`.
 
 The bootstrap script checks whether `/home/ubuntu/Zero-Downtime-Deployment-System/.git` exists for the `ubuntu` user. If it exists, the script validates the checkout but deliberately leaves it unchanged. If it does not exist and the target directory is empty or missing, the script clones `https://github.com/jackpac2/Zero-Downtime-Deployment-System.git` into the ubuntu user's app directory.
 

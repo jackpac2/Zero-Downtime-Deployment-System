@@ -91,9 +91,13 @@ jobs:
       - name: Validate deployment shell syntax
         id: shell_syntax_validation
         run: |
+          bash -n scripts/bootstrap-ec2-host.sh
           bash -n scripts/migrate-to-stable-router.sh
           bash -n scripts/lib/*.sh
           bash -n scripts/tests/*.sh
+
+      - name: Test EC2 bootstrap workflow safety
+        run: bash scripts/tests/test-ec2-bootstrap.sh
 
       - name: Test stable router migration
         id: migration_test

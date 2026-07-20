@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - Main
+  workflow_dispatch:
+    inputs:
+      bootstrap_stable_router:
+        description: Prepare a fresh EC2 host, deploy the legacy stack, and perform the one-time stable-router migration
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: production-deploy
@@ -24,7 +31,7 @@ env:
 
 jobs:
   build-and-deploy:
-    name: Validate, Build, Push, and Deploy
+    name: Validate, Build, Push, and Optionally Bootstrap
     runs-on: ubuntu-latest
     environment: production
 
@@ -36,9 +43,13 @@ jobs:
 
       - name: Validate stable router migration shell syntax
         run: |
+          bash -n scripts/bootstrap-ec2-host.sh
           bash -n scripts/migrate-to-stable-router.sh
           bash -n scripts/lib/*.sh
           bash -n scripts/tests/*.sh
+
+      - name: Test EC2 bootstrap workflow safety
+        run: bash scripts/tests/test-ec2-bootstrap.sh
 
       - name: Test stable router migration
         run: bash scripts/tests/test-stable-router-migration.sh
@@ -163,83 +174,364 @@ jobs:
             org.opencontainers.image.created=${{ steps.vars.outputs.created }}
             org.opencontainers.image.title=zero-downtime-notifier
 
-      - name: Deploy exact commit to EC2
+      - name: Resolve deployment context
+        id: deployment_context
+        env:
+          CONFIGURED_EC2_APP_DIR: ${{ secrets.EC2_APP_DIR }}
+        run: |
+          set -euo pipefail
+          app_dir="${CONFIGURED_EC2_APP_DIR:-/home/ubuntu/Zero-Downtime-Deployment-System}"
+          if [[ "$app_dir" != /* ]] || [ "$app_dir" = / ] || [[ "$app_dir" == *$'\n'* ]] || [[ "$app_dir" == *$'\r'* ]]; then
+            echo "EC2_APP_DIR must be a non-root absolute path on one line." >&2
+            exit 1
+          fi
+          printf 'Resolved EC2 application directory: %s\n' "$app_dir"
+          echo "app_dir=$app_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Explain temporary automatic deployment guard
+        if: github.event_name == 'push'
+        run: echo "EC2 deployment is temporarily manual while the stable-router topology is being activated. Images were built and published successfully."
+
+      - name: Explain disabled manual bootstrap
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router != true
+        run: echo "Manual bootstrap was not requested. Images were built and published; EC2 was not mutated."
+
+      - name: Require Main for manual bootstrap
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true && github.ref != 'refs/heads/Main'
+        run: |
+          echo "The stable-router bootstrap must be dispatched from the Main branch." >&2
+          exit 1
+
+      - name: Configure pinned SSH trust
+        id: ssh_setup
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-          EC2_APP_DIR: ${{ secrets.EC2_APP_DIR }}
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-
+          : "${EC2_HOST:?EC2_HOST is required}"
+          : "${EC2_USER:?EC2_USER is required}"
+          : "${EC2_SSH_KEY:?EC2_SSH_KEY is required}"
+          : "${EC2_KNOWN_HOSTS:?EC2_KNOWN_HOSTS is required}"
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2_deploy_key
           chmod 600 ~/.ssh/ec2_deploy_key
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
-
-          # Bootstrap the ubuntu user's repo copy if the clone only exists elsewhere.
-          ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "bash -s -- '$EC2_APP_DIR' 'https://github.com/${{ github.repository }}.git' 'Main'" < scripts/ensure-ec2-repo.sh
-
-          # Copy the safety-aware launcher from this exact workflow commit. This
-          # avoids depending on an older deploy.sh currently checked out on EC2.
-          tar -czf - scripts/deploy.sh scripts/lib/deployment-common.sh | \
-            ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-              "mkdir -p '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA' && tar -xzf - -C '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA' && chmod u+x '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA/scripts/deploy.sh'"
-
-          # The launcher acquires the server lock, verifies origin/Main, checks
-          # out DEPLOY_SHA, and re-executes deploy.sh from that exact commit.
-          ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "APP_URL=\"http://$EC2_HOST\" EC2_APP_DIR='$EC2_APP_DIR' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' DISCORD_WEBHOOK_URL='$DISCORD_WEBHOOK_URL' '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA/scripts/deploy.sh' '$DEPLOY_SHA'"
-
-      - name: Run post-deployment smoke tests
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-        run: |
-          set -euo pipefail
-
-          smoke_test() {
-            local url="$1"
-            local attempts=12
-            local delay=5
-
-            for attempt in $(seq 1 "$attempts"); do
-              if curl -fsS "$url" >/dev/null; then
-                echo "Smoke test passed: $url"
-                return 0
-              fi
-
-              echo "Smoke test attempt ${attempt}/${attempts} failed: $url"
-              sleep "$delay"
-            done
-
-            curl -f "$url"
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          ssh-keygen -F "$EC2_HOST" -f ~/.ssh/known_hosts >/dev/null || {
+            echo "EC2_KNOWN_HOSTS does not contain an entry for ${EC2_HOST}." >&2
+            exit 1
           }
 
-          smoke_test "http://${EC2_HOST}"
-          smoke_test "http://${EC2_HOST}/api/health"
-      - name: Write deployment summary
-        if: always()
+      - name: Install EC2 prerequisites
+        id: prerequisites
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
         run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            'bash -s' < scripts/bootstrap-ec2-host.sh
+
+      # This is a separate connection so new docker-group membership is active.
+      - name: Verify Docker without sudo after reconnect
+        id: docker_access
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            'set -euo pipefail; docker info >/dev/null; docker compose version'
+
+      - name: Prepare exact EC2 repository commit
+        id: repository
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        env:
+          APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
+          DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          REPOSITORY_URL: https://github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          printf -v parent_args '%q ' "$APP_DIR"
+          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "bash -s -- $parent_args" <<'REMOTE'
+          set -euo pipefail
+          app_dir="$1"
+          if [ ! -e "$app_dir" ]; then
+            sudo install -d -o "$(id -un)" -g "$(id -gn)" "$app_dir"
+          fi
+          [ -d "$app_dir" ] || { echo "EC2 application path is not a directory: ${app_dir}" >&2; exit 1; }
+          test "$(stat -c '%U' "$app_dir")" = "$(id -un)" || {
+            echo "EC2 application directory is not owned by $(id -un): ${app_dir}" >&2
+            exit 1
+          }
+          REMOTE
+
+          printf -v repo_args '%q ' "$APP_DIR" "$REPOSITORY_URL" Main
+          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "bash -s -- $repo_args" < scripts/ensure-ec2-repo.sh
+
+          printf -v app_arg '%q' "$APP_DIR"
+          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "test \"\$(stat -c '%U' $app_arg)\" = \"\$(id -un)\""
+
+          tar -czf - scripts/lib/deployment-common.sh | \
+            ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+              "mkdir -p $app_arg/.deploy/bootstrap/$DEPLOY_SHA && tar -xzf - -C $app_arg/.deploy/bootstrap/$DEPLOY_SHA"
+
+          printf -v exact_args '%q ' "$APP_DIR" "$DEPLOY_SHA"
+          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "bash -s -- $exact_args" <<'REMOTE'
+          set -euo pipefail
+          app_dir="$1"
+          deploy_sha="$2"
+          source "$app_dir/.deploy/bootstrap/$deploy_sha/scripts/lib/deployment-common.sh"
+          validate_deployment_sha "$deploy_sha" "Workflow deployment SHA"
+          ensure_deployment_state_dir "$app_dir/.deploy"
+          acquire_deployment_lock "$app_dir/.deploy"
+          prepare_exact_deployment_commit "$app_dir" "$deploy_sha" Main
+          verify_exact_deployment_commit "$app_dir" "$deploy_sha" Main
+          test "$(git -C "$app_dir" rev-parse HEAD)" = "${deploy_sha,,}"
+          test -x "$app_dir/scripts/deploy.sh"
+          test -x "$app_dir/scripts/migrate-to-stable-router.sh"
+          REMOTE
+
+      - name: Inspect topology marker
+        id: topology
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        env:
+          APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          printf -v topology_arg '%q' "$APP_DIR"
+          set +e
+          starting_topology=$(ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "bash -s -- $topology_arg" <<'REMOTE'
+          set -euo pipefail
+          topology_file="$1/.deploy/topology"
+          if [ ! -e "$topology_file" ]; then
+            echo absent
+            exit 0
+          fi
+          if [ ! -f "$topology_file" ]; then
+            echo invalid
+            echo "Topology marker is not a regular file: ${topology_file}" >&2
+            exit 1
+          fi
+          topology="$(tr -d '[:space:]' < "$topology_file")"
+          if [ "$topology" = stable-router ]; then
+            echo stable-router
+            exit 0
+          fi
+          echo invalid
+          echo "Unknown topology marker value: ${topology:-empty}" >&2
+          exit 1
+          REMOTE
+          )
+          topology_status=$?
+          set -e
+          echo "starting_topology=$starting_topology" >> "$GITHUB_OUTPUT"
+          echo "Starting topology: $starting_topology"
+          exit "$topology_status"
+
+      - name: Deploy legacy stack and run one-time migration
+        id: migration
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        env:
+          APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
+          DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          printf -v remote_args '%q ' "$APP_DIR" "$DEPLOY_SHA" "$EC2_HOST"
           {
-            echo "## Production Deployment Summary"
+            printf 'GHCR_USERNAME=%q\n' "$GHCR_USERNAME"
+            printf 'GHCR_TOKEN=%q\n' "$GHCR_TOKEN"
+            printf 'DISCORD_WEBHOOK_URL=%q\n' "$DISCORD_WEBHOOK_URL"
+            cat <<'REMOTE'
+          set -euo pipefail
+          app_dir="$1"
+          deploy_sha="$2"
+          ec2_host="$3"
+          app_url="http://${ec2_host}"
+          topology_file="$app_dir/.deploy/topology"
+          legacy_file=compose/docker-compose.prod.yml
+          app_file=compose/docker-compose.app.yml
+          router_file=compose/docker-compose.router.yml
+
+          cd "$app_dir"
+          source scripts/lib/deployment-common.sh
+          validate_deployment_sha "$deploy_sha" "Workflow deployment SHA"
+          verify_exact_deployment_commit "$app_dir" "$deploy_sha" Main
+
+          verify_project_services() {
+            local project="$1" file="$2" expected="$3" actual
+            actual=$(docker compose -p "$project" -f "$file" ps --services --status running | sort | tr '\n' ' ' | sed 's/ $//')
+            [ "$actual" = "$expected" ] || {
+              echo "Unexpected running services for ${project}: ${actual:-none}; expected ${expected}." >&2
+              return 1
+            }
+            docker compose -p "$project" -f "$file" ps
+          }
+
+          verify_revision() {
+            local project="$1" file="$2" service="$3" expected_sha="$4" image_id revision
+            image_id=$(docker compose -p "$project" -f "$file" images -q "$service" | head -n 1)
+            [ -n "$image_id" ] || { echo "No image found for ${project}/${service}." >&2; return 1; }
+            revision=$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_id")
+            [ "${revision,,}" = "${expected_sha,,}" ] || {
+              echo "Revision mismatch for ${project}/${service}: expected ${expected_sha}, found ${revision:-missing}." >&2
+              return 1
+            }
+          }
+
+          verify_stable_router() {
+            local expected_sha
+            expected_sha=$(read_deployment_sha_file "$app_dir/.deploy/current.sha" "Current deployment SHA")
+            export IMAGE_TAG="$expected_sha"
+            export DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
+            verify_project_services zero-downtime-app "$app_file" "backend frontend"
+            verify_project_services zero-downtime-router "$router_file" "nginx notifier"
+            docker network inspect zero-downtime-router >/dev/null
+            curl -fsS "${app_url}/router-health" >/dev/null
+            curl -fsS "${app_url}/" >/dev/null
+            curl -fsS "${app_url}/api/health" >/dev/null
+            curl -fsS http://127.0.0.1:9001/health >/dev/null
+            test "$(tr -d '[:space:]' < "$topology_file")" = stable-router
+            if [ -n "$(docker ps -q --filter label=com.docker.compose.project=zero-downtime)" ]; then
+              echo "Legacy zero-downtime project still has running containers." >&2
+              return 1
+            fi
+            verify_revision zero-downtime-app "$app_file" frontend "$expected_sha"
+            verify_revision zero-downtime-app "$app_file" backend "$expected_sha"
+            verify_revision zero-downtime-router "$router_file" notifier "$expected_sha"
+          }
+
+          if [ -e "$topology_file" ]; then
+            topology="$(tr -d '[:space:]' < "$topology_file")"
+          else
+            topology=absent
+          fi
+
+          case "$topology" in
+            absent)
+              APP_URL="$app_url" EC2_HOST="$ec2_host" EC2_APP_DIR="$app_dir" \
+                GHCR_USERNAME="$GHCR_USERNAME" GHCR_TOKEN="$GHCR_TOKEN" \
+                DISCORD_WEBHOOK_URL="$DISCORD_WEBHOOK_URL" \
+                ./scripts/deploy.sh "$deploy_sha"
+              export IMAGE_TAG="$deploy_sha"
+              verify_project_services zero-downtime "$legacy_file" "backend frontend nginx notifier"
+              ./scripts/verify-deployment.sh "$app_url"
+              curl -fsS http://127.0.0.1:9001/health >/dev/null
+              test "$(tr -d '[:space:]' < .deploy/current.sha)" = "${deploy_sha,,}"
+              APP_URL="$app_url" EC2_HOST="$ec2_host" EC2_APP_DIR="$app_dir" \
+                GHCR_USERNAME="$GHCR_USERNAME" GHCR_TOKEN="$GHCR_TOKEN" \
+                DISCORD_WEBHOOK_URL="$DISCORD_WEBHOOK_URL" \
+                bash scripts/migrate-to-stable-router.sh "$deploy_sha"
+              ;;
+            stable-router)
+              echo "The one-time stable-router migration has already completed; verifying without mutation."
+              ;;
+            *)
+              echo "Unknown topology marker value: ${topology:-empty}" >&2
+              exit 1
+              ;;
+          esac
+
+          verify_stable_router
+          echo "Stable-router topology verification completed successfully."
+          REMOTE
+          } | ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "bash -s -- $remote_args"
+
+      - name: Collect safe failure diagnostics
+        if: failure() && github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true && steps.docker_access.outcome == 'success'
+        env:
+          APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          printf -v app_arg '%q' "$APP_DIR"
+          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
+            "cd $app_arg && for project_file in 'zero-downtime compose/docker-compose.prod.yml' 'zero-downtime-app compose/docker-compose.app.yml' 'zero-downtime-router compose/docker-compose.router.yml'; do set -- \$project_file; docker compose -p \"\$1\" -f \"\$2\" ps || true; done; if [ -f .deploy/topology ]; then printf 'Topology marker: '; tr -d '[:space:]' < .deploy/topology; echo; fi"
+
+      - name: Remove temporary SSH material
+        if: always()
+        run: rm -f ~/.ssh/ec2_deploy_key
+
+      - name: Write workflow summary
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BOOTSTRAP_INPUT: ${{ inputs.bootstrap_stable_router || false }}
+          APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
+          PREREQUISITES_OUTCOME: ${{ steps.prerequisites.outcome }}
+          DOCKER_OUTCOME: ${{ steps.docker_access.outcome }}
+          STARTING_TOPOLOGY: ${{ steps.topology.outputs.starting_topology }}
+          MIGRATION_OUTCOME: ${{ steps.migration.outcome }}
+        run: |
+          set -euo pipefail
+          status_value() {
+            case "$1" in
+              success) echo Passed ;;
+              failure) echo Failed ;;
+              *) echo Skipped ;;
+            esac
+          }
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$BOOTSTRAP_INPUT" = true ]; then
+            bootstrap_requested=Yes
+          else
+            bootstrap_requested=No
+          fi
+          starting_topology="${STARTING_TOPOLOGY:-absent}"
+          if [ "$bootstrap_requested" = No ]; then
+            legacy_status=Skipped
+            migration_status=Skipped
+          elif [ "$MIGRATION_OUTCOME" = success ] && [ "$starting_topology" = absent ]; then
+            legacy_status=Ran
+            migration_status=Ran
+          elif [ "$MIGRATION_OUTCOME" = success ] && [ "$starting_topology" = stable-router ]; then
+            legacy_status=Skipped
+            migration_status=Skipped
+          else
+            legacy_status=Failed
+            migration_status=Failed
+          fi
+          health_status="$(status_value "$MIGRATION_OUTCOME")"
+          {
+            echo "## Production Workflow Summary"
             echo ""
             echo "| Item | Value |"
             echo "| --- | --- |"
-            echo "| Deployed Git SHA | ${{ steps.vars.outputs.sha }} |"
-            echo "| Short Git SHA | ${{ steps.vars.outputs.short_sha }} |"
-            echo "| Frontend image | ${{ env.FRONTEND_IMAGE }}:${{ steps.vars.outputs.sha }} |"
-            echo "| Backend image | ${{ env.BACKEND_IMAGE }}:${{ steps.vars.outputs.sha }} |"
-            echo "| Notifier image | ${{ env.NOTIFIER_IMAGE }}:${{ steps.vars.outputs.sha }} |"
-            echo "| EC2 host | ${EC2_HOST} |"
-            echo "| Production Compose file | ${{ env.PROD_COMPOSE_FILE }} |"
-            echo "| Smoke test result | ${{ job.status }} |"
+            echo "| Event type | ${EVENT_NAME} |"
+            echo "| Deployment SHA | ${{ steps.vars.outputs.sha }} |"
+            echo "| EC2 directory | ${APP_DIR:-/home/ubuntu/Zero-Downtime-Deployment-System} |"
+            echo "| Bootstrap requested | ${bootstrap_requested} |"
+            echo "| Prerequisites | $(status_value "$PREREQUISITES_OUTCOME") |"
+            echo "| Docker without sudo | $(status_value "$DOCKER_OUTCOME") |"
+            echo "| Starting topology | ${starting_topology} |"
+            echo "| Legacy deployment | ${legacy_status} |"
+            echo "| Migration | ${migration_status} |"
+            echo "| Final topology | $([ "$MIGRATION_OUTCOME" = success ] && echo stable-router || echo 'Not verified') |"
+            echo "| Router health | ${health_status} |"
+            echo "| Frontend health | ${health_status} |"
+            echo "| Backend health | ${health_status} |"
+            echo "| Notifier health | ${health_status} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
