@@ -14,6 +14,7 @@ env:
   NOTIFIER_IMAGE: ghcr.io/jackpac2/zero-downtime-notifier
   PROD_COMPOSE_FILE: compose/docker-compose.prod.yml
   PROD_COMPOSE_PROJECT: zero-downtime
+  VALIDATION_IMAGE_TAG: "0000000000000000000000000000000000000000"
 
 jobs:
   validate-dev:
@@ -23,6 +24,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Prepare image metadata
         id: vars
@@ -69,7 +72,40 @@ jobs:
 
       - name: Validate production Compose config
         id: compose_validation
-        run: IMAGE_TAG="${{ steps.vars.outputs.sha }}" DISCORD_WEBHOOK_URL="" docker compose -p "$PROD_COMPOSE_PROJECT" -f "$PROD_COMPOSE_FILE" config
+        run: IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p "$PROD_COMPOSE_PROJECT" -f "$PROD_COMPOSE_FILE" config
+
+      - name: Validate prepared router and application Compose configs
+        run: |
+          IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p zero-downtime-app -f compose/docker-compose.app.yml config
+          IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p zero-downtime-router -f compose/docker-compose.router.yml config
+
+      - name: Validate prepared router topology
+        run: bash scripts/tests/test-router-topology.sh
+
+      - name: Validate prepared router Nginx config
+        run: docker run --rm --volume "$PWD/nginx/router.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine nginx -t
+
+      - name: Validate deployment safety helpers
+        run: bash scripts/tests/test-deployment-common.sh
+
+      - name: Validate deployment shell syntax
+        id: shell_syntax_validation
+        run: |
+          bash -n scripts/bootstrap-ec2-host.sh
+          bash -n scripts/migrate-to-stable-router.sh
+          bash -n scripts/lib/*.sh
+          bash -n scripts/tests/*.sh
+
+      - name: Test EC2 bootstrap workflow safety
+        run: bash scripts/tests/test-ec2-bootstrap.sh
+
+      - name: Test stable router migration
+        id: migration_test
+        run: bash scripts/tests/test-stable-router-migration.sh
+
+      - name: Validate Git diff formatting
+        id: diff_check
+        run: git diff --check HEAD^ HEAD
 
       - name: Validate deployment safety helpers
         run: bash scripts/tests/test-deployment-common.sh
@@ -96,6 +132,9 @@ jobs:
             echo "| Backend validation status | ${{ steps.backend_validation.outcome }} |"
             echo "| Notifier validation status | ${{ steps.notifier_validation.outcome }} |"
             echo "| Compose validation status | ${{ steps.compose_validation.outcome }} |"
+            echo "| Shell syntax validation status | ${{ steps.shell_syntax_validation.outcome }} |"
+            echo "| Migration test status | ${{ steps.migration_test.outcome }} |"
+            echo "| Diff check status | ${{ steps.diff_check.outcome }} |"
             echo "| Docker build validation status | ${{ steps.docker_build_validation.outcome }} |"
             echo "| Deployment performed | No |"
           } >> "$GITHUB_STEP_SUMMARY"

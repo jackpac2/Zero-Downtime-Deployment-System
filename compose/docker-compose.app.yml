@@ -1,0 +1,44 @@
+services:
+  frontend:
+    image: ghcr.io/jackpac2/zero-downtime-frontend:${IMAGE_TAG}
+    expose:
+      - "80"
+    networks:
+      default:
+      router:
+        aliases:
+          - app-frontend
+    restart: unless-stopped
+
+  backend:
+    image: ghcr.io/jackpac2/zero-downtime-backend:${IMAGE_TAG}
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      CORS_ORIGIN: http://localhost
+    expose:
+      - "3001"
+    networks:
+      default:
+      router:
+        aliases:
+          - app-backend
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3001/api/health', res => process.exit(res.statusCode >= 200 && res.statusCode < 400 ? 0 : 1)).on('error', () => process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  default:
+  router:
+    name: zero-downtime-router
+    external: true
