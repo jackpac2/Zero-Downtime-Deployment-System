@@ -115,9 +115,6 @@ jobs:
       - name: Validate deployment safety helpers
         run: bash scripts/tests/test-deployment-common.sh
 
-      - name: Validate deployment safety helpers
-        run: bash scripts/tests/test-deployment-common.sh
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -252,16 +249,6 @@ jobs:
           set -euo pipefail
           ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
             'set -euo pipefail; docker info >/dev/null; docker compose version'
-          # Copy the safety-aware launcher from this exact workflow commit. This
-          # avoids depending on an older deploy.sh currently checked out on EC2.
-          tar -czf - scripts/deploy.sh scripts/lib/deployment-common.sh | \
-            ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-              "mkdir -p '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA' && tar -xzf - -C '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA' && chmod u+x '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA/scripts/deploy.sh'"
-
-          # The launcher acquires the server lock, verifies origin/Main, checks
-          # out DEPLOY_SHA, and re-executes deploy.sh from that exact commit.
-          ssh -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "APP_URL=\"http://$EC2_HOST\" EC2_APP_DIR='$EC2_APP_DIR' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' DISCORD_WEBHOOK_URL='$DISCORD_WEBHOOK_URL' '$EC2_APP_DIR/.deploy/bootstrap/$DEPLOY_SHA/scripts/deploy.sh' '$DEPLOY_SHA'"
 
       - name: Prepare exact EC2 repository commit
         id: repository
