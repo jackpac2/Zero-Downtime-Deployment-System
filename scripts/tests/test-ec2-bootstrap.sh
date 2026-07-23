@@ -154,4 +154,7 @@ assert_file_contains "'set -euo pipefail; docker info >/dev/null; docker compose
 assert_file_not_contains "continue-on-error" "$WORKFLOW"
 pass "failed fresh-session Docker access blocks later mutation"
 
+bash "$SCRIPT_DIR/test-ensure-ec2-repo.sh"
+pass "EC2 repository clone diagnostics and cleanup"
+
 printf '%s EC2 bootstrap tests passed.\n' "$PASSED"
