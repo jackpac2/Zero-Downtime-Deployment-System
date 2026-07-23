@@ -33,6 +33,10 @@ fail() {
   exit 1
 }
 
+migration_mode="$(git -C "$ROOT_DIR" ls-files --stage -- scripts/migrate-to-stable-router.sh | awk 'NR == 1 { print $1 }')"
+[ "$migration_mode" = 100755 ] || fail "migration script Git mode is 100755, found ${migration_mode:-missing}"
+pass "migration script is executable in Git"
+
 record() {
   printf '%s\n' "$1" >> "$LOG_FILE"
   [ "$FAIL_AT" != "$1" ]
