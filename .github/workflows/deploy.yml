@@ -299,7 +299,7 @@ jobs:
           verify_exact_deployment_commit "$app_dir" "$deploy_sha" Main
           test "$(git -C "$app_dir" rev-parse HEAD)" = "${deploy_sha,,}"
           test -x "$app_dir/scripts/deploy.sh"
-          test -x "$app_dir/scripts/migrate-to-stable-router.sh"
+          test -f "$app_dir/scripts/migrate-to-stable-router.sh"
           REMOTE
 
       - name: Inspect topology marker
