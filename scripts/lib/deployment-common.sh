@@ -21,6 +21,51 @@ validate_deployment_sha() {
   fi
 }
 
+validate_deployment_color() {
+  local color="${1-}"
+  local label="${2:-Deployment color}"
+
+  case "$color" in
+    blue|green)
+      return 0
+      ;;
+    '')
+      deployment_error "${label} is required. Expected blue or green."
+      ;;
+    *)
+      deployment_error "${label} is invalid. Expected exactly blue or green."
+      ;;
+  esac
+  return 1
+}
+
+deployment_project_for_color() {
+  local color="${1-}"
+  validate_deployment_color "$color" || return 1
+  printf 'zero-downtime-%s\n' "$color"
+}
+
+frontend_alias_for_color() {
+  local color="${1-}"
+  validate_deployment_color "$color" || return 1
+  printf '%s-frontend\n' "$color"
+}
+
+backend_alias_for_color() {
+  local color="${1-}"
+  validate_deployment_color "$color" || return 1
+  printf '%s-backend\n' "$color"
+}
+
+opposite_deployment_color() {
+  local color="${1-}"
+  validate_deployment_color "$color" || return 1
+  case "$color" in
+    blue) printf 'green\n' ;;
+    green) printf 'blue\n' ;;
+  esac
+}
+
 read_deployment_sha_file() {
   local file="$1"
   local label="${2:-Deployment SHA}"
@@ -36,6 +81,21 @@ read_deployment_sha_file() {
   printf '%s\n' "${sha,,}"
 }
 
+read_deployment_color_file() {
+  local file="$1"
+  local label="${2:-Deployment color}"
+  local color
+
+  if [ ! -f "$file" ]; then
+    deployment_error "${label} file not found: ${file}"
+    return 1
+  fi
+
+  color="$(<"$file")"
+  validate_deployment_color "$color" "$label" || return 1
+  printf '%s\n' "$color"
+}
+
 ensure_deployment_state_dir() {
   local deploy_dir="$1"
 
@@ -48,6 +108,85 @@ ensure_deployment_state_dir() {
     deployment_error "Deployment state directory is not writable: ${deploy_dir}"
     return 1
   fi
+}
+
+atomic_write_deployment_state() {
+  local file="$1"
+  local value="$2"
+  local state_dir
+  local temporary_file
+
+  state_dir="$(dirname -- "$file")"
+  ensure_deployment_state_dir "$state_dir" || return 1
+  temporary_file="$(mktemp "${file}.tmp.XXXXXX")" || {
+    deployment_error "Cannot create temporary deployment state file for: ${file}"
+    return 1
+  }
+
+  if ! printf '%s\n' "$value" > "$temporary_file"; then
+    rm -f -- "$temporary_file"
+    deployment_error "Cannot write temporary deployment state file: ${temporary_file}"
+    return 1
+  fi
+
+  if ! mv -f -- "$temporary_file" "$file"; then
+    rm -f -- "$temporary_file"
+    deployment_error "Cannot atomically replace deployment state file: ${file}"
+    return 1
+  fi
+}
+
+write_deployment_color_file() {
+  local file="$1"
+  local color="${2-}"
+  local label="${3:-Deployment color}"
+  validate_deployment_color "$color" "$label" || return 1
+  atomic_write_deployment_state "$file" "$color"
+}
+
+write_deployment_sha_file() {
+  local file="$1"
+  local sha="${2-}"
+  local label="${3:-Deployment SHA}"
+  validate_deployment_sha "$sha" "$label" || return 1
+  atomic_write_deployment_state "$file" "${sha,,}"
+}
+
+read_active_deployment_color() {
+  local deploy_dir="$1"
+  read_deployment_color_file "${deploy_dir}/active-color" "Active deployment color"
+}
+
+write_active_deployment_color() {
+  local deploy_dir="$1"
+  local color="${2-}"
+  write_deployment_color_file "${deploy_dir}/active-color" "$color" "Active deployment color"
+}
+
+read_candidate_deployment_color() {
+  local deploy_dir="$1"
+  read_deployment_color_file "${deploy_dir}/candidate-color" "Candidate deployment color"
+}
+
+write_candidate_deployment_color() {
+  local deploy_dir="$1"
+  local color="${2-}"
+  write_deployment_color_file "${deploy_dir}/candidate-color" "$color" "Candidate deployment color"
+}
+
+read_color_deployment_sha() {
+  local deploy_dir="$1"
+  local color="${2-}"
+  validate_deployment_color "$color" || return 1
+  read_deployment_sha_file "${deploy_dir}/${color}.sha" "${color} deployment SHA"
+}
+
+write_color_deployment_sha() {
+  local deploy_dir="$1"
+  local color="${2-}"
+  local sha="${3-}"
+  validate_deployment_color "$color" || return 1
+  write_deployment_sha_file "${deploy_dir}/${color}.sha" "$sha" "${color} deployment SHA"
 }
 
 acquire_deployment_lock() {

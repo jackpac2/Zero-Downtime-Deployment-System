@@ -5,7 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 ROUTER_COMPOSE="${ROOT_DIR}/compose/docker-compose.router.yml"
-APP_COMPOSE="${ROOT_DIR}/compose/docker-compose.app.yml"
+LEGACY_APP_COMPOSE="${ROOT_DIR}/compose/docker-compose.app-legacy.yml"
+COLOR_APP_COMPOSE="${ROOT_DIR}/compose/docker-compose.app.yml"
 PROD_COMPOSE="${ROOT_DIR}/compose/docker-compose.prod.yml"
 ROUTER_CONFIG="${ROOT_DIR}/nginx/router.conf"
 DUMMY_SHA="0000000000000000000000000000000000000000"
@@ -16,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for required_file in "$ROUTER_COMPOSE" "$APP_COMPOSE" "$PROD_COMPOSE" "$ROUTER_CONFIG"; do
+for required_file in "$ROUTER_COMPOSE" "$LEGACY_APP_COMPOSE" "$COLOR_APP_COMPOSE" "$PROD_COMPOSE" "$ROUTER_CONFIG"; do
   if [ ! -f "$required_file" ]; then
     echo "Topology validation failed: missing ${required_file}" >&2
     exit 1
@@ -37,11 +38,15 @@ export IMAGE_TAG="$DUMMY_SHA"
 export DISCORD_WEBHOOK_URL=""
 
 docker compose -p zero-downtime -f "$PROD_COMPOSE" config --format json > "${TEST_DIR}/prod.json"
-docker compose -p zero-downtime-app -f "$APP_COMPOSE" config --format json > "${TEST_DIR}/app.json"
+docker compose -p zero-downtime-app -f "$LEGACY_APP_COMPOSE" config --format json > "${TEST_DIR}/app.json"
+DEPLOY_COLOR=blue docker compose -p zero-downtime-blue -f "$COLOR_APP_COMPOSE" config --format json > "${TEST_DIR}/blue.json"
+DEPLOY_COLOR=green docker compose -p zero-downtime-green -f "$COLOR_APP_COMPOSE" config --format json > "${TEST_DIR}/green.json"
 docker compose -p zero-downtime-router -f "$ROUTER_COMPOSE" config --format json > "${TEST_DIR}/router.json"
 
 export PROD_JSON="${TEST_DIR}/prod.json"
 export APP_JSON="${TEST_DIR}/app.json"
+export BLUE_JSON="${TEST_DIR}/blue.json"
+export GREEN_JSON="${TEST_DIR}/green.json"
 export ROUTER_JSON="${TEST_DIR}/router.json"
 export ROUTER_CONFIG
 export DEPLOY_SCRIPT="${ROOT_DIR}/scripts/deploy.sh"
@@ -86,6 +91,8 @@ function hasNetwork(service, network) {
 
 const prod = readJson(process.env.PROD_JSON)
 const app = readJson(process.env.APP_JSON)
+const blue = readJson(process.env.BLUE_JSON)
+const green = readJson(process.env.GREEN_JSON)
 const router = readJson(process.env.ROUTER_JSON)
 const routerConfig = fs.readFileSync(process.env.ROUTER_CONFIG, 'utf8')
 const deployScript = fs.readFileSync(process.env.DEPLOY_SCRIPT, 'utf8')
@@ -99,6 +106,27 @@ assert(
   JSON.stringify(serviceNames(app)) === JSON.stringify(['backend', 'frontend']),
   'application Compose must contain only frontend and backend'
 )
+for (const [color, config] of [['blue', blue], ['green', green]]) {
+  assert(
+    JSON.stringify(serviceNames(config)) === JSON.stringify(['backend', 'frontend']),
+    `${color} application Compose must contain only frontend and backend`
+  )
+  assert(ports(config.services.frontend).length === 0, `${color} frontend must not publish a host port`)
+  assert(ports(config.services.backend).length === 0, `${color} backend must not publish a host port`)
+  assert(
+    networkAliases(config.services.frontend, 'router').includes(`${color}-frontend`),
+    `${color} frontend alias is missing`
+  )
+  assert(
+    networkAliases(config.services.backend, 'router').includes(`${color}-backend`),
+    `${color} backend alias is missing`
+  )
+  assert(
+    !networkAliases(config.services.frontend, 'router').includes('app-frontend') &&
+      !networkAliases(config.services.backend, 'router').includes('app-backend'),
+    `${color} must not claim the live application aliases`
+  )
+}
 assert(
   JSON.stringify(serviceNames(prod)) === JSON.stringify(['backend', 'frontend', 'nginx', 'notifier']),
   'legacy production Compose service set changed unexpectedly'

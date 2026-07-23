@@ -76,11 +76,16 @@ jobs:
 
       - name: Validate prepared router and application Compose configs
         run: |
-          IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p zero-downtime-app -f compose/docker-compose.app.yml config
+          IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p zero-downtime-app -f compose/docker-compose.app-legacy.yml config
+          DEPLOY_COLOR=blue IMAGE_TAG="$VALIDATION_IMAGE_TAG" docker compose -p zero-downtime-blue -f compose/docker-compose.app.yml config
+          DEPLOY_COLOR=green IMAGE_TAG="$VALIDATION_IMAGE_TAG" docker compose -p zero-downtime-green -f compose/docker-compose.app.yml config
           IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p zero-downtime-router -f compose/docker-compose.router.yml config
 
       - name: Validate prepared router topology
         run: bash scripts/tests/test-router-topology.sh
+
+      - name: Validate Blue and Green preparation
+        run: bash scripts/tests/test-blue-green-preparation.sh
 
       - name: Validate prepared router Nginx config
         run: docker run --rm --volume "$PWD/nginx/router.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine nginx -t

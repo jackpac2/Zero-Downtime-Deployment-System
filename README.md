@@ -10,7 +10,8 @@ The application source code is shared between development and production:
 - `compose/docker-compose.dev.yml` is for local development and manual testing.
 - `compose/docker-compose.prod.yml` is for production deployment on EC2.
 - `compose/docker-compose.router.yml` prepares the stable Nginx and notifier project.
-- `compose/docker-compose.app.yml` prepares the separately managed frontend and backend project.
+- `compose/docker-compose.app-legacy.yml` preserves the currently migrated `zero-downtime-app` definition.
+- `compose/docker-compose.app.yml` prepares an isolated Blue or Green frontend/backend candidate.
 - `scripts/ensure-ec2-repo.sh` bootstraps the repo into the ubuntu user's EC2 app directory if it is missing.
 - `scripts/bootstrap-ec2-host.sh` idempotently installs Ubuntu prerequisites and configures non-sudo Docker access.
 - `scripts/deploy.sh` is the EC2 deployment entrypoint.
@@ -79,7 +80,9 @@ The repository contains a prepared split between the stable control plane and th
 
 `compose/docker-compose.router.yml` contains only public Nginx and the deployment notifier. Nginx owns port `80`, mounts `nginx/router.conf` read-only, and provides `/router-health` without contacting either application service. The notifier retains `127.0.0.1:9001:4000`, its webhook environment variable, and its health check.
 
-`compose/docker-compose.app.yml` contains only frontend and backend. Both remain on the application's project-local default network. They also join the external `zero-downtime-router` network with the unique aliases `app-frontend` and `app-backend`. Neither service publishes a host port.
+`compose/docker-compose.app-legacy.yml` contains the live migrated frontend and backend definition. Both remain on the application's project-local default network and join the external `zero-downtime-router` network as `app-frontend` and `app-backend`. Existing migration and verification paths continue using this compatibility file, so the live router target is unchanged.
+
+`compose/docker-compose.app.yml` is the Phase 3A candidate template. A validated `DEPLOY_COLOR=blue` or `DEPLOY_COLOR=green` selects the isolated project `zero-downtime-blue` or `zero-downtime-green`. The candidates use only `blue-frontend`/`blue-backend` or `green-frontend`/`green-backend` on the shared router network. They publish no host ports and never claim the live `app-frontend` or `app-backend` aliases.
 
 The external network must be created once before either prepared project is started:
 
@@ -91,7 +94,7 @@ Because the network is declared `external`, normal `docker compose down` operati
 
 The prepared router uses Docker's embedded DNS resolver at `127.0.0.11`. Its `proxy_pass` targets contain variables, so Nginx resolves `app-frontend` and `app-backend` while handling requests instead of resolving each name only when Nginx starts. Results are cached for at most 10 seconds. Recreating an application container can therefore give its alias a new IP without requiring a router restart. While an alias is temporarily unavailable, proxied application requests return an upstream error, but `/router-health` continues returning `200`; Nginx retries DNS resolution and recovers when the alias is available again.
 
-Production deployment and rollback still use `compose/docker-compose.prod.yml`, the original `nginx/nginx.conf`, and the single `zero-downtime` Compose project. The split files are activated only by the one-time manually dispatched migration. Normal stable-router deployment, stable-router rollback, Blue/Green environments, active-color state, and traffic switching are not implemented.
+Production deployment and rollback still use `compose/docker-compose.prod.yml`, the original `nginx/nginx.conf`, and the single `zero-downtime` Compose project. Phase 3A only prepares color-aware candidate definitions and state helpers. It does not create either color on EC2, replace `zero-downtime-app`, change the live router aliases, or implement traffic switching or color-aware rollback.
 
 Validate the prepared topology without starting production services:
 
@@ -100,9 +103,12 @@ export IMAGE_TAG=0000000000000000000000000000000000000000
 export DISCORD_WEBHOOK_URL=""
 
 docker compose -p zero-downtime -f compose/docker-compose.prod.yml config
-docker compose -p zero-downtime-app -f compose/docker-compose.app.yml config
+docker compose -p zero-downtime-app -f compose/docker-compose.app-legacy.yml config
+DEPLOY_COLOR=blue docker compose -p zero-downtime-blue -f compose/docker-compose.app.yml config
+DEPLOY_COLOR=green docker compose -p zero-downtime-green -f compose/docker-compose.app.yml config
 docker compose -p zero-downtime-router -f compose/docker-compose.router.yml config
 bash scripts/tests/test-router-topology.sh
+bash scripts/tests/test-blue-green-preparation.sh
 docker run --rm \
   --volume "$PWD/nginx/router.conf:/etc/nginx/conf.d/default.conf:ro" \
   nginx:1.27-alpine nginx -t
@@ -182,6 +188,8 @@ It may contain:
 - `rolled-back-from.sha`
 - `deployment.lock`
 
+Phase 3A also provides validated, atomic helpers for future `active-color`, `candidate-color`, `blue.sha`, and `green.sha` state. Color files accept exactly `blue` or `green`; SHA files accept exactly 40 hexadecimal characters. These files are not written by any production path in this phase, and no active color is fabricated for the existing `zero-downtime-app` project.
+
 These files should stay on EC2 and should not be committed to GitHub.
 
 ## Production CI/CD Transition Flow
@@ -232,7 +240,7 @@ If the GHCR packages are public, EC2 does not need GHCR login. If they are priva
 
 ## One-Time EC2 Bootstrap and Stable-Router Migration
 
-The one-time path is manual because it changes production topology while the normal deploy and rollback scripts are still legacy-only. In GitHub Actions, open **Build and Deploy**, choose **Run workflow** for the intended `Main` commit, enable `bootstrap_stable_router`, and start the run. A dispatch with the input disabled only validates, builds, and publishes images.
+The topology-aware deployment path is manual because it can change production topology while the normal deploy and rollback scripts are still legacy-only. In GitHub Actions, open **Build and Deploy**, choose **Run workflow** from `Main`, and start the run. No “new instance” checkbox is required: the workflow reads `.deploy/topology` and selects bootstrap/migration for an absent marker or verification-only behavior for `stable-router`.
 
 The EC2 security group must allow SSH port 22 from the permitted source and public HTTP port 80. Port 9001 must not be public; the notifier remains bound to `127.0.0.1` and is checked over SSH.
 
@@ -257,7 +265,7 @@ Final EC2 checks:
 ```bash
 cd /home/ubuntu/Zero-Downtime-Deployment-System
 export IMAGE_TAG="$(tr -d '[:space:]' < .deploy/current.sha)"
-docker compose -p zero-downtime-app -f compose/docker-compose.app.yml ps
+docker compose -p zero-downtime-app -f compose/docker-compose.app-legacy.yml ps
 docker compose -p zero-downtime-router -f compose/docker-compose.router.yml ps
 docker network inspect zero-downtime-router
 curl -fsS http://localhost/router-health
@@ -272,11 +280,22 @@ Operator runbook:
 
 1. Merge to `Main`.
 2. Confirm validation, exact-SHA builds, and GHCR publication succeed, and confirm the push summary says EC2 mutation was skipped.
-3. Verify the required secrets, then manually dispatch **Build and Deploy** with `bootstrap_stable_router=true` for that commit.
+3. Verify the required secrets, then manually dispatch **Build and Deploy** from `Main` for that commit.
 4. Monitor prerequisite installation, the fresh-session Docker check, exact-commit preparation, legacy deployment, migration, and final verification.
 5. Confirm the summary reports `stable-router` and all health checks passed.
 
-This is not true Blue/Green deployment. There are no blue/green environments, active-color state, or traffic-switching controls.
+This is not yet true Blue/Green deployment. Phase 3A defines two non-conflicting candidate environments and safe future state helpers, but neither color is deployed and there is no traffic-switching control.
+
+## Phase 3A Candidate Verification
+
+Once a later phase starts one color, verify it without using the public Nginx route:
+
+```bash
+bash scripts/verify-color-candidate.sh blue <full-40-character-image-sha>
+bash scripts/verify-color-candidate.sh green <full-40-character-image-sha>
+```
+
+The verifier rejects invalid colors and SHAs, requires exactly one running frontend and backend in the expected color project, checks both image revision labels and shared-network aliases, then launches an ephemeral container on `zero-downtime-router` to request the color-specific frontend and backend directly. It publishes no port, changes no state, and contains no router reload or traffic-switch operation.
 
 ## Required EC2 Setup
 

@@ -5,12 +5,6 @@ on:
     branches:
       - Main
   workflow_dispatch:
-    inputs:
-      bootstrap_stable_router:
-        description: Prepare a fresh EC2 host, deploy the legacy stack, and perform the one-time stable-router migration
-        required: true
-        type: boolean
-        default: false
 
 concurrency:
   group: production-deploy
@@ -31,7 +25,7 @@ env:
 
 jobs:
   build-and-deploy:
-    name: Validate, Build, Push, and Optionally Bootstrap
+    name: Validate, Build, Push, and Manually Deploy
     runs-on: ubuntu-latest
     environment: production
 
@@ -103,7 +97,9 @@ jobs:
 
       - name: Validate prepared router and application Compose configs
         run: |
-          IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p zero-downtime-app -f compose/docker-compose.app.yml config
+          IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p zero-downtime-app -f compose/docker-compose.app-legacy.yml config
+          DEPLOY_COLOR=blue IMAGE_TAG="$VALIDATION_IMAGE_TAG" docker compose -p zero-downtime-blue -f compose/docker-compose.app.yml config
+          DEPLOY_COLOR=green IMAGE_TAG="$VALIDATION_IMAGE_TAG" docker compose -p zero-downtime-green -f compose/docker-compose.app.yml config
           IMAGE_TAG="$VALIDATION_IMAGE_TAG" DISCORD_WEBHOOK_URL="" docker compose -p zero-downtime-router -f compose/docker-compose.router.yml config
 
       - name: Validate prepared router topology
@@ -192,19 +188,15 @@ jobs:
         if: github.event_name == 'push'
         run: echo "EC2 deployment is temporarily manual while the stable-router topology is being activated. Images were built and published successfully."
 
-      - name: Explain disabled manual bootstrap
-        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router != true
-        run: echo "Manual bootstrap was not requested. Images were built and published; EC2 was not mutated."
-
-      - name: Require Main for manual bootstrap
-        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true && github.ref != 'refs/heads/Main'
+      - name: Require Main for manual deployment
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/Main'
         run: |
-          echo "The stable-router bootstrap must be dispatched from the Main branch." >&2
+          echo "The stable-router deployment must be dispatched from the Main branch." >&2
           exit 1
 
       - name: Configure SSH key
         id: ssh_setup
-        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        if: github.event_name == 'workflow_dispatch'
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
@@ -226,7 +218,7 @@ jobs:
 
       - name: Install EC2 prerequisites
         id: prerequisites
-        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        if: github.event_name == 'workflow_dispatch'
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
@@ -238,7 +230,7 @@ jobs:
       # This is a separate connection so new docker-group membership is active.
       - name: Verify Docker without sudo after reconnect
         id: docker_access
-        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        if: github.event_name == 'workflow_dispatch'
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
@@ -249,7 +241,7 @@ jobs:
 
       - name: Prepare exact EC2 repository commit
         id: repository
-        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        if: github.event_name == 'workflow_dispatch'
         env:
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
           DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
@@ -304,7 +296,7 @@ jobs:
 
       - name: Inspect topology marker
         id: topology
-        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        if: github.event_name == 'workflow_dispatch'
         env:
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -344,7 +336,7 @@ jobs:
 
       - name: Deploy legacy stack and run one-time migration
         id: migration
-        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true
+        if: github.event_name == 'workflow_dispatch'
         env:
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
           DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
@@ -368,7 +360,7 @@ jobs:
           app_url="http://${ec2_host}"
           topology_file="$app_dir/.deploy/topology"
           legacy_file=compose/docker-compose.prod.yml
-          app_file=compose/docker-compose.app.yml
+          app_file=compose/docker-compose.app-legacy.yml
           router_file=compose/docker-compose.router.yml
 
           cd "$app_dir"
@@ -457,7 +449,7 @@ jobs:
             "bash -s -- $remote_args"
 
       - name: Collect safe failure diagnostics
-        if: failure() && github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true && steps.docker_access.outcome == 'success'
+        if: failure() && github.event_name == 'workflow_dispatch' && steps.docker_access.outcome == 'success'
         env:
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -466,7 +458,7 @@ jobs:
           set -euo pipefail
           printf -v app_arg '%q' "$APP_DIR"
           ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "cd $app_arg && for project_file in 'zero-downtime compose/docker-compose.prod.yml' 'zero-downtime-app compose/docker-compose.app.yml' 'zero-downtime-router compose/docker-compose.router.yml'; do set -- \$project_file; docker compose -p \"\$1\" -f \"\$2\" ps || true; done; if [ -f .deploy/topology ]; then printf 'Topology marker: '; tr -d '[:space:]' < .deploy/topology; echo; fi"
+            "cd $app_arg && for project_file in 'zero-downtime compose/docker-compose.prod.yml' 'zero-downtime-app compose/docker-compose.app-legacy.yml' 'zero-downtime-router compose/docker-compose.router.yml'; do set -- \$project_file; docker compose -p \"\$1\" -f \"\$2\" ps || true; done; if [ -f .deploy/topology ]; then printf 'Topology marker: '; tr -d '[:space:]' < .deploy/topology; echo; fi"
 
       - name: Remove temporary SSH material
         if: always()
@@ -476,7 +468,6 @@ jobs:
         if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BOOTSTRAP_INPUT: ${{ inputs.bootstrap_stable_router || false }}
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
           PREREQUISITES_OUTCOME: ${{ steps.prerequisites.outcome }}
           DOCKER_OUTCOME: ${{ steps.docker_access.outcome }}
@@ -491,7 +482,7 @@ jobs:
               *) echo Skipped ;;
             esac
           }
-          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$BOOTSTRAP_INPUT" = true ]; then
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
             bootstrap_requested=Yes
           else
             bootstrap_requested=No

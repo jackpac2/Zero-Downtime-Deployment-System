@@ -120,16 +120,18 @@ assert_file_contains "EC2_APP_DIR must be a non-root absolute path on one line."
 assert_file_not_contains 'sudo install -d -o "$(id -un)" -g "$(id -gn)" "$parent"' "$WORKFLOW"
 pass "unsafe app paths and parent ownership changes are rejected"
 
-manual_condition="github.event_name == 'workflow_dispatch' && inputs.bootstrap_stable_router == true"
+manual_condition="github.event_name == 'workflow_dispatch'"
 manual_step_count=$(grep -Fc "if: ${manual_condition}" "$WORKFLOW")
 [ "$manual_step_count" -ge 5 ] || fail "manual EC2 steps are not consistently dispatch-gated"
 assert_file_contains "if: github.event_name == 'push'" "$WORKFLOW"
 assert_file_contains "EC2 deployment is temporarily manual" "$WORKFLOW"
-assert_file_contains "github.ref != 'refs/heads/Main'" "$WORKFLOW"
+assert_file_contains "if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/Main'" "$WORKFLOW"
+assert_file_not_contains "bootstrap_stable_router" "$WORKFLOW"
+assert_file_not_contains "inputs.bootstrap_stable_router" "$WORKFLOW"
 assert_file_not_contains "ssh-keyscan" "$WORKFLOW"
 assert_file_not_contains "EC2_KNOWN_HOSTS" "$WORKFLOW"
 assert_file_contains "StrictHostKeyChecking accept-new" "$WORKFLOW"
-pass "push disabled dispatch non-Main dispatch and SSH trust-on-first-use are enforced"
+pass "push guard direct manual dispatch Main restriction and SSH trust-on-first-use are enforced"
 
 line_prerequisites=$(grep -nF -- '- name: Install EC2 prerequisites' "$WORKFLOW" | cut -d: -f1)
 line_reconnect=$(grep -nF -- '- name: Verify Docker without sudo after reconnect' "$WORKFLOW" | cut -d: -f1)
