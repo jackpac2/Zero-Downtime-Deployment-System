@@ -59,7 +59,10 @@ migration_stop_new_application() { record stop-new-app || true; }
 migration_restore_legacy() { record restore-legacy; }
 migration_verify_restored_legacy() { record verify-restored-legacy; }
 migration_print_manual_recovery() { record manual-recovery || true; }
-migration_notify() { return 0; }
+migration_notify() {
+  [ "$#" -eq 3 ] || fail "migration_notify expected 3 arguments, found $#"
+  return 0
+}
 migration_report_success() { record success; }
 
 migration_commit_state() {

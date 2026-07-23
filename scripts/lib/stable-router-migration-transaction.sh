@@ -17,7 +17,10 @@ migration_handle_failure() {
     local failed_phase="$1"
 
     migration_capture_diagnostics "$failed_phase" || true
-    migration_notify "migration_failed" "$failed_phase" || true
+    migration_notify \
+        "migration_failed" \
+        "error" \
+        "Stable-router migration failed during ${failed_phase}." || true
 
     if [ "$MIGRATION_LEGACY_STOPPED" = true ]; then
         migration_stop_new_router || true
@@ -25,9 +28,15 @@ migration_handle_failure() {
 
         if migration_restore_legacy && migration_verify_restored_legacy; then
             remove_created_network_if_safe || true
-            migration_notify "migration_legacy_restored" "$failed_phase" || true
+            migration_notify \
+                "migration_legacy_restored" \
+                "warning" \
+                "Migration failed during ${failed_phase}; the legacy project was restored." || true
         else
-            migration_notify "migration_manual_recovery_required" "$failed_phase" || true
+            migration_notify \
+                "migration_manual_recovery_required" \
+                "error" \
+                "Migration failed during ${failed_phase}; manual recovery is required." || true
             migration_print_manual_recovery "$failed_phase" || true
         fi
     elif [ "$MIGRATION_PREPARATION_STARTED" = true ]; then
@@ -40,7 +49,10 @@ run_stable_router_migration() {
         migration_handle_failure "preflight"
         return 1
     }
-    migration_notify "migration_preflight_complete" "preflight" || true
+    migration_notify \
+        "migration_preflight_complete" \
+        "success" \
+        "Stable-router migration preflight completed." || true
 
     MIGRATION_PREPARATION_STARTED=true
     migration_run_step "network-preparation" migration_prepare_network || {
@@ -62,7 +74,10 @@ run_stable_router_migration() {
         migration_handle_failure "application-verification"
         return 1
     }
-    migration_notify "migration_application_ready" "application-verification" || true
+    migration_notify \
+        "migration_application_ready" \
+        "success" \
+        "The stable-router application project is ready." || true
 
     # Set this before stopping anything. If Compose only partially stops the
     # legacy project, the failure handler must still take the restoration path.
@@ -71,7 +86,10 @@ run_stable_router_migration() {
         migration_handle_failure "legacy-shutdown"
         return 1
     }
-    migration_notify "migration_legacy_stopped" "legacy-shutdown" || true
+    migration_notify \
+        "migration_legacy_stopped" \
+        "warning" \
+        "The legacy project is stopped and cutover is in progress." || true
 
     migration_run_step "port-release-verification" migration_verify_cutover_ports || {
         migration_handle_failure "port-release-verification"
@@ -99,6 +117,9 @@ run_stable_router_migration() {
     }
 
     MIGRATION_PHASE="complete"
-    migration_notify "migration_succeeded" "complete" || true
+    migration_notify \
+        "migration_succeeded" \
+        "success" \
+        "Stable-router migration completed successfully." || true
     migration_report_success
 }
