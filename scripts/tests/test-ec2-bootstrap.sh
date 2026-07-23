@@ -127,7 +127,9 @@ assert_file_contains "if: github.event_name == 'push'" "$WORKFLOW"
 assert_file_contains "EC2 deployment is temporarily manual" "$WORKFLOW"
 assert_file_contains "github.ref != 'refs/heads/Main'" "$WORKFLOW"
 assert_file_not_contains "ssh-keyscan" "$WORKFLOW"
-pass "push disabled dispatch and non-Main dispatch cannot enter bootstrap"
+assert_file_not_contains "EC2_KNOWN_HOSTS" "$WORKFLOW"
+assert_file_contains "StrictHostKeyChecking accept-new" "$WORKFLOW"
+pass "push disabled dispatch non-Main dispatch and SSH trust-on-first-use are enforced"
 
 line_prerequisites=$(grep -nF -- '- name: Install EC2 prerequisites' "$WORKFLOW" | cut -d: -f1)
 line_reconnect=$(grep -nF -- '- name: Verify Docker without sudo after reconnect' "$WORKFLOW" | cut -d: -f1)

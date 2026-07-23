@@ -216,7 +216,6 @@ Required repository secrets:
 | `EC2_HOST` | Your EC2 public DNS name or public IP address |
 | `EC2_USER` | `ubuntu` |
 | `EC2_SSH_KEY` | Private SSH key that can connect to the EC2 instance |
-| `EC2_KNOWN_HOSTS` | Pinned OpenSSH `known_hosts` entry for `EC2_HOST`, verified out of band |
 
 `EC2_APP_DIR` is optional. If empty or unset, every bootstrap step uses exactly `/home/ubuntu/Zero-Downtime-Deployment-System`.
 
@@ -273,7 +272,7 @@ Operator runbook:
 
 1. Merge to `Main`.
 2. Confirm validation, exact-SHA builds, and GHCR publication succeed, and confirm the push summary says EC2 mutation was skipped.
-3. Verify `EC2_KNOWN_HOSTS` and the required secrets, then manually dispatch **Build and Deploy** with `bootstrap_stable_router=true` for that commit.
+3. Verify the required secrets, then manually dispatch **Build and Deploy** with `bootstrap_stable_router=true` for that commit.
 4. Monitor prerequisite installation, the fresh-session Docker check, exact-commit preparation, legacy deployment, migration, and final verification.
 5. Confirm the summary reports `stable-router` and all health checks passed.
 
@@ -284,7 +283,7 @@ This is not true Blue/Green deployment. There are no blue/green environments, ac
 The manual workflow prepares a fresh Ubuntu host, but the instance must already have:
 
 - An SSH deployment user, normally `ubuntu`, with passwordless sudo for package, service, and group administration.
-- SSH access configured for `EC2_SSH_KEY` and matching the pinned `EC2_KNOWN_HOSTS` entry.
+- SSH access configured for `EC2_SSH_KEY`. The workflow accepts a new host key on first contact and rejects a changed key for the remainder of the run.
 - Ports 22 and 80 allowed as described above.
 - Ubuntu user: `ubuntu`
 - Repository cloned at `/home/ubuntu/Zero-Downtime-Deployment-System`
