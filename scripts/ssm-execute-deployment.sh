@@ -34,7 +34,7 @@ read_secure_parameter() {
   if [ -z "$parameter_name" ]; then
     return 0
   fi
-  [[ "$parameter_name" =~ ^/[A-Za-z0-9_.\-/]+$ ]] || { echo "Invalid secure parameter name." >&2; return 1; }
+  [[ "$parameter_name" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "Invalid secure parameter name." >&2; return 1; }
   aws ssm get-parameter \
     --region "$AWS_REGION_VALUE" \
     --name "$parameter_name" \

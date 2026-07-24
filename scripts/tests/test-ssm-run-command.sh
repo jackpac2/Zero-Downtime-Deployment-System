@@ -5,11 +5,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 SSM_HELPER="${ROOT_DIR}/scripts/run-ssm-command.sh"
+SSM_DEPLOYMENT_WRAPPER="${ROOT_DIR}/scripts/ssm-execute-deployment.sh"
 TEST_ROOT="$(mktemp -d)"
 MOCK_BIN="${TEST_ROOT}/bin"
 AWS_LOG="${TEST_ROOT}/aws.log"
 PARAMETERS_CAPTURE="${TEST_ROOT}/parameters.json"
 PAYLOAD_SCRIPT="${TEST_ROOT}/payload.sh"
+APP_DIR="${TEST_ROOT}/app"
+COORDINATOR="${APP_DIR}/scripts/stable-router-deployment-coordinator.sh"
+SUDO_LOG="${TEST_ROOT}/sudo.log"
 
 cleanup() { rm -rf -- "$TEST_ROOT"; }
 trap cleanup EXIT
@@ -62,6 +66,9 @@ case "$*" in
       printf '%s\n' '{"Status":"Success","ResponseCode":0,"StandardOutputContent":"remote output","StandardErrorContent":""}'
     fi
     ;;
+  'ssm get-parameter'*)
+    echo mock-secret
+    ;;
   *) exit 99 ;;
 esac
 MOCK_AWS
@@ -112,4 +119,52 @@ set -e
 assert_contains 'did not return a command ID' "$TEST_ROOT/empty.err"
 pass "missing SSM command ID fails closed"
 
-printf '3 SSM Run Command tests passed.\n'
+mkdir -p "$APP_DIR/.git" "$(dirname "$COORDINATOR")"
+: > "$COORDINATOR"
+
+cat > "$MOCK_BIN/id" <<'MOCK_ID'
+#!/usr/bin/env bash
+if [ "${1:-}" = -u ]; then
+  echo 0
+  exit 0
+fi
+[ "$#" -eq 1 ] && exit 0
+exit 1
+MOCK_ID
+
+cat > "$MOCK_BIN/sudo" <<'MOCK_SUDO'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_SUDO_LOG"
+MOCK_SUDO
+chmod +x "$MOCK_BIN/id" "$MOCK_BIN/sudo"
+
+parameter_prefix=/zero-downtime-deployment/github-actions/123456789-1
+MOCK_AWS_LOG="$AWS_LOG" MOCK_SUDO_LOG="$SUDO_LOG" PATH="$MOCK_BIN:$PATH" \
+  bash "$SSM_DEPLOYMENT_WRAPPER" \
+    ubuntu "$APP_DIR" 0000000000000000000000000000000000000000 203.0.113.10 us-east-1 \
+    "$parameter_prefix/ghcr-username" \
+    "$parameter_prefix/ghcr-token" \
+    "$parameter_prefix/discord-webhook" \
+    "$COORDINATOR"
+assert_contains "ssm get-parameter --region us-east-1 --name $parameter_prefix/ghcr-username" "$AWS_LOG"
+assert_contains '-u ubuntu -H -- bash' "$SUDO_LOG"
+pass "generated secure parameter paths are accepted"
+
+for invalid_parameter in \
+  "$parameter_prefix/bad name" \
+  "$parameter_prefix/\$(id)" \
+  ../outside; do
+  set +e
+  MOCK_AWS_LOG="$AWS_LOG" MOCK_SUDO_LOG="$SUDO_LOG" PATH="$MOCK_BIN:$PATH" \
+    bash "$SSM_DEPLOYMENT_WRAPPER" \
+      ubuntu "$APP_DIR" 0000000000000000000000000000000000000000 203.0.113.10 us-east-1 \
+      "$invalid_parameter" "" "" "$COORDINATOR" \
+      > /dev/null 2> "$TEST_ROOT/invalid-parameter.err"
+  invalid_status=$?
+  set -e
+  [ "$invalid_status" -ne 0 ] || fail "unsafe parameter name returned success: $invalid_parameter"
+  assert_contains 'Invalid secure parameter name.' "$TEST_ROOT/invalid-parameter.err"
+done
+pass "unsafe secure parameter paths fail closed"
+
+printf '5 SSM deployment transport tests passed.\n'
