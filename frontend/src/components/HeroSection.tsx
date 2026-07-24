@@ -7,7 +7,7 @@ export function HeroSection() {
       <div>
         <div className="mb-6 inline-flex items-center gap-2 rounded-lg border border-line bg-white/80 px-3 py-2 text-sm font-bold text-slate-700 shadow-sm">
           <span className="h-2 w-2 rounded-full bg-mint" />
-          Milestone 1 command center
+          Blue/Green release command center
         </div>
 
         <h1 className="max-w-4xl text-5xl font-extrabold leading-[1.03] tracking-normal text-ink sm:text-6xl lg:text-7xl">
