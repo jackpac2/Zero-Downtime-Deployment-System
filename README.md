@@ -230,7 +230,7 @@ Required repository variables:
 
 `EC2_USER`, `EC2_SSH_KEY`, and `EC2_KNOWN_HOSTS` are no longer used by the workflow.
 
-`EC2_HOST` is no longer a repository secret. After OIDC authentication, the workflow uses `ec2:DescribeInstances` with `EC2_INSTANCE_ID` and `AWS_REGION`, requires the instance to be running, and exports its current public IPv4 address for deployment and HTTP verification.
+`EC2_HOST` is no longer a repository secret or pipeline variable. After OIDC authentication, the workflow uses `ec2:DescribeInstances` with `EC2_INSTANCE_ID` and `AWS_REGION`, requires the instance to be running, and exposes the inferred address as the `public_ip` step output. Deployment verification and notifier alerts receive `APP_URL=http://<public-ip>` directly.
 
 `EC2_APP_DIR` is optional. If empty or unset, every bootstrap step uses exactly `/home/ubuntu/Zero-Downtime-Deployment-System`.
 
@@ -386,8 +386,8 @@ The workflow also uses Docker Buildx cache, OCI image labels, production concurr
 The manual path checks:
 
 ```bash
-curl -f http://$EC2_HOST
-curl -f http://$EC2_HOST/api/health
+curl -f http://<inferred-public-ip>
+curl -f http://<inferred-public-ip>/api/health
 ```
 
 The server-side verification retries frontend and API checks. Phase 3B additionally verifies router health and automatically restores the previous router target when public verification fails.

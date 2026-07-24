@@ -259,7 +259,7 @@ jobs:
           fi
 
           instance_state=$(jq -r '.State // empty' <<< "$instance_details")
-          EC2_HOST=$(jq -r '.PublicIp // empty' <<< "$instance_details")
+          EC2_PUBLIC_IP=$(jq -r '.PublicIp // empty' <<< "$instance_details")
 
           case "$instance_state" in
             ""|None|null)
@@ -271,19 +271,19 @@ jobs:
             echo "EC2 instance ${EC2_INSTANCE_ID} must be running; found state ${instance_state}." >&2
             exit 1
           fi
-          case "$EC2_HOST" in
+          case "$EC2_PUBLIC_IP" in
             ""|None|null)
               echo "Running EC2 instance ${EC2_INSTANCE_ID} has no public IPv4 address." >&2
               exit 1
               ;;
           esac
-          [[ "$EC2_HOST" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
+          [[ "$EC2_PUBLIC_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
             echo "EC2 instance ${EC2_INSTANCE_ID} returned an invalid public IPv4 address." >&2
             exit 1
           }
 
-          echo "::add-mask::$EC2_HOST"
-          echo "EC2_HOST=$EC2_HOST" >> "$GITHUB_ENV"
+          echo "::add-mask::$EC2_PUBLIC_IP"
+          echo "public_ip=$EC2_PUBLIC_IP" >> "$GITHUB_OUTPUT"
           echo "Resolved the public IPv4 address for running EC2 instance ${EC2_INSTANCE_ID}."
 
       - name: Store transient deployment secrets
@@ -495,12 +495,13 @@ jobs:
           AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
           EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
           DEPLOY_USER: ${{ steps.aws_deployment.outputs.deployment_user }}
+          EC2_PUBLIC_IP: ${{ steps.ec2_address.outputs.public_ip }}
           GHCR_USERNAME_PARAMETER: ${{ steps.ssm_secrets.outputs.username_parameter }}
           GHCR_TOKEN_PARAMETER: ${{ steps.ssm_secrets.outputs.token_parameter }}
           DISCORD_WEBHOOK_PARAMETER: ${{ steps.ssm_secrets.outputs.webhook_parameter }}
         run: |
           set -euo pipefail
-          : "${EC2_HOST:?Resolved EC2 public IPv4 address is unavailable}"
+          : "${EC2_PUBLIC_IP:?Resolved EC2 public IPv4 address is unavailable}"
           invocation_script="$(mktemp)"
           trap 'rm -f -- "$invocation_script"' EXIT
           cat > "$invocation_script" <<'REMOTE'
@@ -512,7 +513,7 @@ jobs:
             --comment "Deploy and verify stable-router Blue/Green topology" \
             --root \
             --script "$invocation_script" \
-            -- "$DEPLOY_USER" "$APP_DIR" "$DEPLOY_SHA" "$EC2_HOST" "$AWS_REGION_VALUE" \
+            -- "$DEPLOY_USER" "$APP_DIR" "$DEPLOY_SHA" "$EC2_PUBLIC_IP" "$AWS_REGION_VALUE" \
                "$GHCR_USERNAME_PARAMETER" "$GHCR_TOKEN_PARAMETER" "$DISCORD_WEBHOOK_PARAMETER"
 
       - name: Collect safe failure diagnostics

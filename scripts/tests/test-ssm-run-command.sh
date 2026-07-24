@@ -149,6 +149,17 @@ MOCK_AWS_LOG="$AWS_LOG" MOCK_SUDO_LOG="$SUDO_LOG" PATH="$MOCK_BIN:$PATH" \
 assert_contains "ssm get-parameter --region us-east-1 --name $parameter_prefix/ghcr-username" "$AWS_LOG"
 assert_contains '-u ubuntu -H -- bash' "$SUDO_LOG"
 pass "generated secure parameter paths are accepted"
+set +e
+MOCK_AWS_LOG="$AWS_LOG" MOCK_SUDO_LOG="$SUDO_LOG" PATH="$MOCK_BIN:$PATH" \
+  bash "$SSM_DEPLOYMENT_WRAPPER" \
+    ubuntu "$APP_DIR" 0000000000000000000000000000000000000000 not-an-ip us-east-1 \
+    "" "" "" "$COORDINATOR" \
+    > /dev/null 2> "$TEST_ROOT/invalid-public-ip.err"
+invalid_ip_status=$?
+set -e
+[ "$invalid_ip_status" -ne 0 ] || fail "invalid inferred public IP returned success"
+assert_contains 'Invalid inferred EC2 public IPv4 address.' "$TEST_ROOT/invalid-public-ip.err"
+pass "invalid inferred public IP fails closed"
 
 for invalid_parameter in \
   "$parameter_prefix/bad name" \
@@ -167,4 +178,4 @@ for invalid_parameter in \
 done
 pass "unsafe secure parameter paths fail closed"
 
-printf '5 SSM deployment transport tests passed.\n'
+printf '6 SSM deployment transport tests passed.\n'

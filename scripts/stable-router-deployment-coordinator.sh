@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-[ "$#" -eq 3 ] || { echo "Usage: $0 <app-dir> <deployment-sha> <public-ec2-host>" >&2; exit 1; }
-app_dir="$1"; deploy_sha="$2"; ec2_host="$3"; app_url="http://${ec2_host}"
+[ "$#" -eq 3 ] || { echo "Usage: $0 <app-dir> <deployment-sha> <public-ip>" >&2; exit 1; }
+app_dir="$1"; deploy_sha="$2"; public_ip="$3"
+[[ "$public_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "Invalid inferred EC2 public IPv4 address." >&2; exit 1; }
+app_url="http://${public_ip}"
 topology_file="$app_dir/.deploy/topology"
 cd "$app_dir"
 source scripts/lib/deployment-common.sh
@@ -44,10 +46,10 @@ if [ -e "$topology_file" ]; then topology="$(tr -d '[:space:]' < "$topology_file
 echo "Topology: ${topology}"
 case "$topology" in
   absent)
-    APP_URL="$app_url" EC2_HOST="$ec2_host" EC2_APP_DIR="$app_dir" \
+    APP_URL="$app_url" EC2_APP_DIR="$app_dir" \
       GHCR_USERNAME="${GHCR_USERNAME:-}" GHCR_TOKEN="${GHCR_TOKEN:-}" DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}" \
       ./scripts/deploy.sh "$deploy_sha"
-    APP_URL="$app_url" EC2_HOST="$ec2_host" EC2_APP_DIR="$app_dir" \
+    APP_URL="$app_url" EC2_APP_DIR="$app_dir" \
       GHCR_USERNAME="${GHCR_USERNAME:-}" GHCR_TOKEN="${GHCR_TOKEN:-}" DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}" \
       bash scripts/migrate-to-stable-router.sh "$deploy_sha"
     ;;
@@ -57,7 +59,7 @@ case "$topology" in
   *) echo "Unknown topology marker value: ${topology:-empty}" >&2; exit 1 ;;
 esac
 
-APP_URL="$app_url" EC2_HOST="$ec2_host" EC2_APP_DIR="$app_dir" DEPLOYMENT_ASSET_SHA="$deploy_sha" \
+APP_URL="$app_url" EC2_APP_DIR="$app_dir" DEPLOYMENT_ASSET_SHA="$deploy_sha" \
   GHCR_USERNAME="${GHCR_USERNAME:-}" GHCR_TOKEN="${GHCR_TOKEN:-}" DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}" \
   ./scripts/deploy-blue-green.sh "$deploy_sha"
 verify_stable_router
