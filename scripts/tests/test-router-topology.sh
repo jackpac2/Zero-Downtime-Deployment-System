@@ -51,6 +51,8 @@ export ROUTER_JSON="${TEST_DIR}/router.json"
 export ROUTER_CONFIG
 export DEPLOY_SCRIPT="${ROOT_DIR}/scripts/deploy.sh"
 export ROLLBACK_SCRIPT="${ROOT_DIR}/scripts/rollback.sh"
+export BLUE_GREEN_DEPLOY_SCRIPT="${ROOT_DIR}/scripts/deploy-blue-green.sh"
+export BLUE_GREEN_ROLLBACK_SCRIPT="${ROOT_DIR}/scripts/rollback-blue-green.sh"
 
 node <<'NODE'
 const fs = require('node:fs')
@@ -188,15 +190,13 @@ assert(
 )
 
 for (const script of [deployScript, rollbackScript]) {
-  assert(
-    script.includes('compose/docker-compose.prod.yml'),
-    'active deployment scripts must continue using docker-compose.prod.yml'
-  )
-  assert(
-    !script.includes('docker-compose.router.yml') && !script.includes('docker-compose.app.yml'),
-    'prepared Compose files must not be active deployment inputs'
-  )
+  assert(script.includes('compose/docker-compose.prod.yml'), 'legacy compatibility entrypoints must remain available')
 }
+const blueGreenDeploy = fs.readFileSync(process.env.BLUE_GREEN_DEPLOY_SCRIPT, 'utf8')
+const blueGreenRollback = fs.readFileSync(process.env.BLUE_GREEN_ROLLBACK_SCRIPT, 'utf8')
+assert(blueGreenDeploy.includes('compose/docker-compose.app.yml'), 'Blue/Green deploy must use color Compose')
+assert(blueGreenDeploy.includes('compose/docker-compose.router.yml'), 'Blue/Green deploy must control stable router')
+assert(blueGreenRollback.includes('compose/docker-compose.app.yml'), 'Blue/Green rollback must use retained color')
 
 console.log('Router topology validation passed.')
 NODE

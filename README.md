@@ -14,7 +14,9 @@ The application source code is shared between development and production:
 - `compose/docker-compose.app.yml` prepares an isolated Blue or Green frontend/backend candidate.
 - `scripts/ensure-ec2-repo.sh` bootstraps the repo into the ubuntu user's EC2 app directory if it is missing.
 - `scripts/bootstrap-ec2-host.sh` idempotently installs Ubuntu prerequisites and configures non-sudo Docker access.
-- `scripts/deploy.sh` is the EC2 deployment entrypoint.
+- `scripts/deploy.sh` remains the pre-migration legacy deployment entrypoint.
+- `scripts/deploy-blue-green.sh` is the stable-router Blue/Green deployment entrypoint.
+- `scripts/rollback-blue-green.sh` switches back to the retained opposite color without rebuilding.
 - `scripts/migrate-to-stable-router.sh` performs the one-time legacy-to-stable-router migration.
 - `.github/workflows/deploy.yml` is the GitHub Actions workflow.
 
@@ -61,7 +63,7 @@ Production exposes:
 80:80
 ```
 
-## Prepared Stable Router Topology
+## Stable Router Blue/Green Topology
 
 The repository contains a prepared split between the stable control plane and the application lifecycle:
 
@@ -82,7 +84,7 @@ The repository contains a prepared split between the stable control plane and th
 
 `compose/docker-compose.app-legacy.yml` contains the live migrated frontend and backend definition. Both remain on the application's project-local default network and join the external `zero-downtime-router` network as `app-frontend` and `app-backend`. Existing migration and verification paths continue using this compatibility file, so the live router target is unchanged.
 
-`compose/docker-compose.app.yml` is the Phase 3A candidate template. A validated `DEPLOY_COLOR=blue` or `DEPLOY_COLOR=green` selects the isolated project `zero-downtime-blue` or `zero-downtime-green`. The candidates use only `blue-frontend`/`blue-backend` or `green-frontend`/`green-backend` on the shared router network. They publish no host ports and never claim the live `app-frontend` or `app-backend` aliases.
+`compose/docker-compose.app.yml` is the Blue/Green application template. A validated `DEPLOY_COLOR=blue` or `DEPLOY_COLOR=green` selects the isolated project `zero-downtime-blue` or `zero-downtime-green`. The candidates use only `blue-frontend`/`blue-backend` or `green-frontend`/`green-backend` on the shared router network. They publish no host ports and never claim the live `app-frontend` or `app-backend` aliases.
 
 The external network must be created once before either prepared project is started:
 
@@ -94,7 +96,7 @@ Because the network is declared `external`, normal `docker compose down` operati
 
 The prepared router uses Docker's embedded DNS resolver at `127.0.0.11`. Its `proxy_pass` targets contain variables, so Nginx resolves `app-frontend` and `app-backend` while handling requests instead of resolving each name only when Nginx starts. Results are cached for at most 10 seconds. Recreating an application container can therefore give its alias a new IP without requiring a router restart. While an alias is temporarily unavailable, proxied application requests return an upstream error, but `/router-health` continues returning `200`; Nginx retries DNS resolution and recovers when the alias is available again.
 
-Production deployment and rollback still use `compose/docker-compose.prod.yml`, the original `nginx/nginx.conf`, and the single `zero-downtime` Compose project. Phase 3A only prepares color-aware candidate definitions and state helpers. It does not create either color on EC2, replace `zero-downtime-app`, change the live router aliases, or implement traffic switching or color-aware rollback.
+After `.deploy/topology` is `stable-router`, production deployment uses `deploy-blue-green.sh` and color-aware rollback uses `rollback-blue-green.sh`. The legacy `deploy.sh`, `rollback.sh`, and combined Compose file remain available only for pre-migration compatibility. The stable router is reloaded gracefully; it is never recreated by a color switch.
 
 Validate the prepared topology without starting production services:
 
@@ -149,7 +151,7 @@ It performs these steps:
 - Shows running containers with `docker ps`.
 - Writes `.deploy/current.sha` only after verification succeeds.
 
-This remains an in-place deployment. Blue/Green environments and traffic switching are not implemented.
+After migration, use the Blue/Green entrypoint described below. The legacy in-place entrypoint remains only for bootstrap and migration compatibility.
 
 ## Deployment Safety Prerequisites
 
@@ -188,7 +190,7 @@ It may contain:
 - `rolled-back-from.sha`
 - `deployment.lock`
 
-Phase 3A also provides validated, atomic helpers for future `active-color`, `candidate-color`, `blue.sha`, and `green.sha` state. Color files accept exactly `blue` or `green`; SHA files accept exactly 40 hexadecimal characters. These files are not written by any production path in this phase, and no active color is fabricated for the existing `zero-downtime-app` project.
+Phase 3B uses `active-color`, `candidate-color`, `blue.sha`, and `green.sha`. Color files accept exactly `blue` or `green`; SHA files accept exactly 40 hexadecimal characters. `candidate-color` exists only during an operation and is removed after success or handled failure. `active-color` is written last, only after public verification. No active color is fabricated for the legacy application.
 
 These files should stay on EC2 and should not be committed to GitHub.
 
@@ -197,18 +199,18 @@ These files should stay on EC2 and should not be committed to GitHub.
 During stable-router activation, a push or merge to `Main`:
 
 1. Validates the application, scripts, Compose files, Nginx configuration, migration transaction, and bootstrap safety tests.
-2. Builds and publishes frontend, backend, and notifier images tagged with the full SHA, short SHA, and `latest`.
-3. Prints that EC2 deployment is temporarily manual.
+2. Builds and publishes frontend, backend, and notifier images tagged with the full SHA and short SHA.
+3. Confirms that push-to-Main does not mutate EC2 and that activation requires manual dispatch.
 4. Does not contact EC2, deploy the legacy project, or run migration.
 
-This temporary guard is required because `deploy.sh` and `rollback.sh` still operate only on the legacy `zero-downtime` project. The old automatic step could otherwise recreate Nginx on port 80 and the notifier on port 9001 after migration. Normal stable-router deployment and rollback are the next phase; automatic EC2 mutation must remain paused until that work is complete.
+The push guard remains intentional: pushes validate, build, and publish images but never mutate EC2. A manual dispatch is the only production activation path.
 ## Production CI/CD Flow
 
 The production flow is:
 
 1. Developer pushes to `Main`.
 2. GitHub Actions validates the safety helpers and builds frontend, backend, and notifier Docker images.
-3. GitHub Actions tags images with the full Git SHA, short Git SHA, and `latest`.
+3. GitHub Actions tags images with the full Git SHA and short Git SHA.
 4. GitHub Actions pushes images to GHCR.
 5. A manual dispatch uses GitHub OIDC to assume the configured AWS IAM role.
 6. GitHub Actions resolves the running instance's current public IPv4 address from `EC2_INSTANCE_ID`.
@@ -249,7 +251,7 @@ The manual workflow copies non-empty GHCR and webhook secrets into uniquely name
 
 ## One-Time EC2 Bootstrap and Stable-Router Migration
 
-The topology-aware deployment path is manual because it can change production topology while the normal deploy and rollback scripts are still legacy-only. In GitHub Actions, open **Build and Deploy**, choose **Run workflow** from `Main`, and start the run. No “new instance” checkbox is required: the workflow reads `.deploy/topology` and selects bootstrap/migration for an absent marker or verification-only behavior for `stable-router`.
+The topology-aware deployment path is manual because it changes production traffic. In GitHub Actions, open **Build and Deploy**, choose **Run workflow** from `Main`, and start the run. No “new instance” checkbox is required: the workflow reads `.deploy/topology`, runs bootstrap/migration first when absent, and otherwise invokes controlled Blue/Green activation.
 
 The EC2 security group must allow public HTTP port 80. Direct port 22 access is not required by the workflow. Port 9001 must not be public; the notifier remains bound to `127.0.0.1` and is checked locally by the SSM command.
 
@@ -260,14 +262,14 @@ The workflow prints the resolved application directory once, creates its parent 
 It reads `.deploy/topology` as plain text:
 
 - No marker means fresh or legacy. The workflow calls `deploy.sh`, verifies the combined `zero-downtime` project and `.deploy/current.sha`, then calls `migrate-to-stable-router.sh`.
-- Exactly `stable-router` means migration already completed. It skips legacy deployment and migration, then verifies the application and router projects, shared network, health endpoints, exact legacy-project absence, and image revision labels.
+- Exactly `stable-router` means migration already completed. It skips migration and invokes the controlled Blue/Green deployment for the exact workflow SHA.
 - Any other value fails before production mutation.
 
 Legacy is deployed first because migration preflight requires a healthy combined stack whose `current.sha` matches the requested image SHA. `deploy.sh` continues to own legacy Compose, verification, and rollback. The migration script owns network creation, application preparation, legacy shutdown, router startup, transaction cleanup, legacy restoration, and the atomic topology marker.
 
 If migration fails before cutover, it cleans prepared resources. If it fails after legacy shutdown, it stops new resources and attempts to restore and verify legacy. The workflow remains failed even if restoration succeeds. A final-verification failure produces safe status diagnostics without broad workflow cleanup.
 
-Repeated manual runs are idempotent: a healthy `stable-router` marker selects verification-only behavior. The marker prevents manual remigration, while the push guard prevents automatic legacy recreation. Do not manually run legacy `deploy.sh` or `rollback.sh` after migration; stable-router-aware versions are the next phase.
+Repeated manual runs never repeat migration. A `stable-router` marker selects the Blue/Green controller, while the push guard prevents automatic EC2 mutation. Do not manually run legacy `deploy.sh` or `rollback.sh` after migration.
 
 Final EC2 checks:
 
@@ -293,9 +295,9 @@ Operator runbook:
 4. Monitor prerequisite installation, the fresh-session Docker check, exact-commit preparation, legacy deployment, migration, and final verification.
 5. Confirm the summary reports `stable-router` and all health checks passed.
 
-This is not yet true Blue/Green deployment. Phase 3A defines two non-conflicting candidate environments and safe future state helpers, but neither color is deployed and there is no traffic-switching control.
+This is a controlled Blue/Green deployment: the inactive color is prepared and verified before the stable router changes target.
 
-## Phase 3A Candidate Verification
+## Private Candidate Verification
 
 Once a later phase starts one color, verify it without using the public Nginx route:
 
@@ -306,6 +308,32 @@ bash scripts/verify-color-candidate.sh green <full-40-character-image-sha>
 
 The verifier rejects invalid colors and SHAs, requires exactly one running frontend and backend in the expected color project, checks both image revision labels and shared-network aliases, then launches an ephemeral container on `zero-downtime-router` to request the color-specific frontend and backend directly. It publishes no port, changes no state, and contains no router reload or traffic-switch operation.
 
+
+## Phase 3B Operations
+
+Run a deployment on a stable-router host with:
+
+```bash
+./scripts/deploy-blue-green.sh <full-40-character-git-sha>
+```
+
+The script requires the shared deployment lock and `stable-router` topology. With no `active-color`, it requires the migrated `zero-downtime-app` to be live, selects Blue deterministically, deploys and privately verifies Blue, validates a rendered Blue router configuration, gracefully reloads Nginx, verifies public frontend, API, and router health, and only then records Blue as active. The legacy application remains running so the first switch can restore `app-frontend` and `app-backend` immediately.
+
+For later deployments, active Blue selects Green and active Green selects Blue. `DEPLOY_COLOR` and `IMAGE_TAG` are supplied explicitly to `compose/docker-compose.app.yml`; the exact-SHA images are pulled and only the inactive project is reconciled. Candidate services publish no host ports. The previous color remains running as the immediate rollback target.
+
+Router configurations are generated by `scripts/render-router-config.sh`, which accepts only `legacy`, `blue`, or `green`. A temporary Nginx container and the running router validate the candidate before replacement. The controller stages the active configuration inside the existing Nginx container because the original router uses a read-only single-file bind mount; this avoids router recreation and permits an atomic internal config install followed by graceful `nginx -s reload`. The host config is atomically updated for future container recreation.
+
+If candidate verification or Nginx validation fails, traffic and `active-color` are untouched. If reload or public verification fails, the previous host and internal router configurations are restored, Nginx is reloaded, and the former public target is verified. Candidate diagnostics are retained in Docker logs and `.deploy/failed-candidate.sha`; `candidate-color` is cleared. State is committed in this order: color SHA, `previous.sha`, `current.sha`, then `active-color`; a state-write failure restores the snapshot and prior route.
+
+Rollback does not pull or rebuild:
+
+```bash
+./scripts/rollback-blue-green.sh
+```
+
+It validates the current color, opposite retained color, retained SHA, running services, private health, router configuration, and public health before writing state. Missing, malformed, stopped, or unhealthy retained state fails closed.
+
+The GitHub Actions **Build and Deploy** workflow uses the same path only for a manual dispatch from `Main`. An absent topology first runs the existing bootstrap and one-time migration, then performs first Blue activation. A push to `Main` only validates, builds, and publishes; it never sends SSM commands or changes EC2.
 ## Required EC2 Setup
 
 The manual workflow prepares a fresh Ubuntu host, but the instance must already have:
@@ -362,7 +390,7 @@ curl -f http://$EC2_HOST
 curl -f http://$EC2_HOST/api/health
 ```
 
-The server-side verification script retries these checks and starts automatic rollback when the initial legacy deployment fails. Blue/Green deployment is not implemented.
+The server-side verification retries frontend and API checks. Phase 3B additionally verifies router health and automatically restores the previous router target when public verification fails.
 
 
 ## EC2 Repo Bootstrap

@@ -93,6 +93,13 @@ jobs:
       - name: Validate deployment safety helpers
         run: bash scripts/tests/test-deployment-common.sh
 
+      - name: Test controlled Blue/Green activation and rollback
+        run: |
+          bash scripts/tests/test-blue-green-preparation.sh
+          bash scripts/tests/test-router-rendering.sh
+          bash scripts/tests/test-router-switch.sh
+          bash scripts/tests/test-blue-green-activation.sh
+
       - name: Validate deployment shell syntax
         id: shell_syntax_validation
         run: |
@@ -113,6 +120,7 @@ jobs:
 
       - name: Validate deployment safety helpers
         run: bash scripts/tests/test-deployment-common.sh
+
 
       - name: Validate Docker image builds
         id: docker_build_validation

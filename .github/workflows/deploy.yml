@@ -111,6 +111,13 @@ jobs:
       - name: Validate deployment safety helpers
         run: bash scripts/tests/test-deployment-common.sh
 
+      - name: Test controlled Blue/Green activation and rollback
+        run: |
+          bash scripts/tests/test-blue-green-preparation.sh
+          bash scripts/tests/test-router-rendering.sh
+          bash scripts/tests/test-router-switch.sh
+          bash scripts/tests/test-blue-green-activation.sh
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -131,7 +138,6 @@ jobs:
           tags: |
             ${{ env.FRONTEND_IMAGE }}:${{ steps.vars.outputs.sha }}
             ${{ env.FRONTEND_IMAGE }}:${{ steps.vars.outputs.short_sha }}
-            ${{ env.FRONTEND_IMAGE }}:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.vars.outputs.sha }}
@@ -148,7 +154,6 @@ jobs:
           tags: |
             ${{ env.BACKEND_IMAGE }}:${{ steps.vars.outputs.sha }}
             ${{ env.BACKEND_IMAGE }}:${{ steps.vars.outputs.short_sha }}
-            ${{ env.BACKEND_IMAGE }}:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.vars.outputs.sha }}
@@ -163,7 +168,6 @@ jobs:
           tags: |
             ${{ env.NOTIFIER_IMAGE }}:${{ steps.vars.outputs.sha }}
             ${{ env.NOTIFIER_IMAGE }}:${{ steps.vars.outputs.short_sha }}
-            ${{ env.NOTIFIER_IMAGE }}:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.vars.outputs.sha }}
@@ -184,9 +188,9 @@ jobs:
           printf 'Resolved EC2 application directory: %s\n' "$app_dir"
           echo "app_dir=$app_dir" >> "$GITHUB_OUTPUT"
 
-      - name: Explain temporary automatic deployment guard
+      - name: Confirm manual production activation guard
         if: github.event_name == 'push'
-        run: echo "EC2 deployment is temporarily manual while the stable-router topology is being activated. Images were built and published successfully."
+        run: echo "Push-to-Main does not mutate EC2. Images were built and published; use manual workflow dispatch for controlled production activation."
 
       - name: Require Main for manual deployment
         if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/Main'
@@ -423,6 +427,9 @@ jobs:
           test -x "$app_dir/scripts/deploy.sh"
           test -f "$app_dir/scripts/migrate-to-stable-router.sh"
           test -f "$app_dir/scripts/stable-router-deployment-coordinator.sh"
+          test -x "$app_dir/scripts/deploy-blue-green.sh"
+          test -x "$app_dir/scripts/rollback-blue-green.sh"
+          test -x "$app_dir/scripts/render-router-config.sh"
           test -f "$app_dir/scripts/ssm-execute-deployment.sh"
           REMOTE
           } > "$exact_commit_script"
@@ -479,7 +486,7 @@ jobs:
           echo "Starting topology: $starting_topology"
           exit "$topology_status"
 
-      - name: Deploy legacy stack and run one-time migration
+      - name: Deploy through stable-router Blue/Green coordinator
         id: migration
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -502,7 +509,7 @@ jobs:
           REMOTE
           bash scripts/run-ssm-command.sh \
             --instance-id "$EC2_INSTANCE_ID" \
-            --comment "Deploy and verify stable-router topology" \
+            --comment "Deploy and verify stable-router Blue/Green topology" \
             --root \
             --script "$invocation_script" \
             -- "$DEPLOY_USER" "$APP_DIR" "$DEPLOY_SHA" "$EC2_HOST" "$AWS_REGION_VALUE" \
@@ -524,7 +531,9 @@ jobs:
           for project_file in \
             'zero-downtime compose/docker-compose.prod.yml' \
             'zero-downtime-app compose/docker-compose.app-legacy.yml' \
-            'zero-downtime-router compose/docker-compose.router.yml'; do
+            'zero-downtime-router compose/docker-compose.router.yml' \
+            'zero-downtime-blue compose/docker-compose.app.yml' \
+            'zero-downtime-green compose/docker-compose.app.yml'; do
             set -- $project_file
             docker compose -p "$1" -f "$2" ps || true
           done
@@ -533,6 +542,9 @@ jobs:
             tr -d '[:space:]' < .deploy/topology
             echo
           fi
+          for state in active-color candidate-color current.sha previous.sha blue.sha green.sha; do
+            if [ -f ".deploy/$state" ]; then printf '%s: ' "$state"; tr -d '[:space:]' < ".deploy/$state"; echo; fi
+          done
           REMOTE
           bash scripts/run-ssm-command.sh \
             --instance-id "$EC2_INSTANCE_ID" \

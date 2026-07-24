@@ -189,6 +189,37 @@ write_color_deployment_sha() {
   write_deployment_sha_file "${deploy_dir}/${color}.sha" "$sha" "${color} deployment SHA"
 }
 
+require_stable_router_topology() {
+  local deploy_dir="$1" topology_file="${1}/topology" topology
+  [ -f "$topology_file" ] || { deployment_error "Stable-router topology marker is missing: ${topology_file}"; return 1; }
+  topology="$(<"$topology_file")"
+  [ "$topology" = stable-router ] || { deployment_error "Unknown deployment topology: ${topology:-empty}"; return 1; }
+}
+
+select_blue_green_candidate() {
+  local deploy_dir="$1" active_file="${1}/active-color" active
+  if [ ! -e "$active_file" ]; then printf 'blue\n'; return 0; fi
+  [ -f "$active_file" ] || { deployment_error "Active deployment color is not a regular file: ${active_file}"; return 1; }
+  active="$(read_active_deployment_color "$deploy_dir")" || return 1
+  opposite_deployment_color "$active"
+}
+
+clear_candidate_deployment_color() {
+  rm -f -- "${1}/candidate-color"
+}
+
+commit_blue_green_state() {
+  local deploy_dir="$1" old_sha="$2" new_color="$3" new_sha="$4"
+  validate_deployment_sha "$old_sha" "Previous deployment SHA" || return 1
+  validate_deployment_color "$new_color" "New active color" || return 1
+  validate_deployment_sha "$new_sha" "Current deployment SHA" || return 1
+  write_color_deployment_sha "$deploy_dir" "$new_color" "$new_sha" || return 1
+  write_deployment_sha_file "${deploy_dir}/previous.sha" "$old_sha" "Previous deployment SHA" || return 1
+  write_deployment_sha_file "${deploy_dir}/current.sha" "$new_sha" "Current deployment SHA" || return 1
+  write_active_deployment_color "$deploy_dir" "$new_color" || return 1
+  clear_candidate_deployment_color "$deploy_dir"
+}
+
 acquire_deployment_lock() {
   local deploy_dir="$1"
   local lock_file

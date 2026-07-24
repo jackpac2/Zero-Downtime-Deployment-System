@@ -131,7 +131,7 @@ manual_condition="github.event_name == 'workflow_dispatch'"
 manual_step_count=$(grep -Fc "if: ${manual_condition}" "$WORKFLOW")
 [ "$manual_step_count" -ge 5 ] || fail "manual EC2 steps are not consistently dispatch-gated"
 assert_file_contains "if: github.event_name == 'push'" "$WORKFLOW"
-assert_file_contains "EC2 deployment is temporarily manual" "$WORKFLOW"
+assert_file_contains "Push-to-Main does not mutate EC2" "$WORKFLOW"
 assert_file_contains "if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/Main'" "$WORKFLOW"
 assert_file_not_contains "bootstrap_stable_router" "$WORKFLOW"
 assert_file_not_contains "inputs.bootstrap_stable_router" "$WORKFLOW"
@@ -173,7 +173,7 @@ line_ec2_address=$(grep -nF -- '- name: Resolve EC2 public IPv4 address' "$WORKF
 line_reconnect=$(grep -nF -- '- name: Verify Docker without sudo after reconnect' "$WORKFLOW" | cut -d: -f1)
 line_repository=$(grep -nF -- '- name: Prepare exact EC2 repository commit' "$WORKFLOW" | cut -d: -f1)
 line_topology=$(grep -nF -- '- name: Inspect topology marker' "$WORKFLOW" | cut -d: -f1)
-line_migration=$(grep -nF -- '- name: Deploy legacy stack and run one-time migration' "$WORKFLOW" | cut -d: -f1)
+line_migration=$(grep -nF -- '- name: Deploy through stable-router Blue/Green coordinator' "$WORKFLOW" | cut -d: -f1)
 [ "$line_aws_credentials" -lt "$line_ec2_address" ] && \
   [ "$line_ec2_address" -lt "$line_prerequisites" ] && \
   [ "$line_prerequisites" -lt "$line_reconnect" ] && \
@@ -188,7 +188,8 @@ assert_file_contains 'stable-router)' "$COORDINATOR"
 assert_file_contains 'Unknown topology marker value' "$COORDINATOR"
 assert_file_contains './scripts/deploy.sh "$deploy_sha"' "$COORDINATOR"
 assert_file_contains 'bash scripts/migrate-to-stable-router.sh "$deploy_sha"' "$COORDINATOR"
-assert_file_contains 'The one-time stable-router migration has already completed; verifying without mutation.' "$COORDINATOR"
+assert_file_contains 'Stable-router topology already active; migration is skipped.' "$COORDINATOR"
+assert_file_contains './scripts/deploy-blue-green.sh "$deploy_sha"' "$COORDINATOR"
 assert_file_contains 'verify_stable_router' "$COORDINATOR"
 assert_file_contains 'test -x "$app_dir/scripts/deploy.sh"' "$WORKFLOW"
 assert_file_contains 'test -f "$app_dir/scripts/migrate-to-stable-router.sh"' "$WORKFLOW"
