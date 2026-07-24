@@ -6,10 +6,11 @@ source "${SCRIPT_DIR}/lib/router-switch.sh"
 [ "$#" -eq 0 ] || { echo "Usage: $0" >&2; exit 1; }
 APP_DIR="${EC2_APP_DIR:-/home/ubuntu/Zero-Downtime-Deployment-System}"
 DEPLOY_DIR="${APP_DIR}/.deploy"; APP_FILE=compose/docker-compose.app.yml; ROUTER_FILE=compose/docker-compose.router.yml
-ROUTER_CONFIG="${APP_DIR}/nginx/router.conf"; ROUTER_RENDERER="${APP_DIR}/scripts/render-router-config.sh"
+ROUTER_CONFIG="$(runtime_router_config_path "$DEPLOY_DIR")"; ROUTER_RENDERER="${APP_DIR}/scripts/render-router-config.sh"
 CURRENT_FILE="${DEPLOY_DIR}/current.sha"; PREVIOUS_FILE="${DEPLOY_DIR}/previous.sha"
 DOCKER=(); ROUTER_COMPOSE=(); TARGET_COMPOSE=(); STATE_DIR=""; STATE_WRITING=false
 cd "$APP_DIR"; ensure_deployment_state_dir "$DEPLOY_DIR"; acquire_deployment_lock "$DEPLOY_DIR"; require_stable_router_topology "$DEPLOY_DIR"
+ROUTER_CONFIG="$(ensure_runtime_router_config "$DEPLOY_DIR" "$ROUTER_RENDERER")"
 ACTIVE_COLOR="$(read_active_deployment_color "$DEPLOY_DIR")"; TARGET_COLOR="$(opposite_deployment_color "$ACTIVE_COLOR")"
 CURRENT_SHA="$(read_deployment_sha_file "$CURRENT_FILE" "Current deployment SHA")"
 ACTIVE_SHA="$(read_color_deployment_sha "$DEPLOY_DIR" "$ACTIVE_COLOR")"; [ "$CURRENT_SHA" = "$ACTIVE_SHA" ] || { echo "Active color state is inconsistent." >&2; exit 1; }

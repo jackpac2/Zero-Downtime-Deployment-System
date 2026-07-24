@@ -35,6 +35,8 @@ LEGACY_FILE="compose/docker-compose.prod.yml"
 APP_FILE="compose/docker-compose.app-legacy.yml"
 ROUTER_FILE="compose/docker-compose.router.yml"
 ROUTER_NETWORK="zero-downtime-router"
+ROUTER_RENDERER="${APP_DIR}/scripts/render-router-config.sh"
+ROUTER_CONFIG="$(runtime_router_config_path "$DEPLOY_DIR")"
 NETWORK_CREATED=false
 LEGACY_SHA=""
 CUTOVER_STARTED_AT=""
@@ -159,7 +161,7 @@ migration_preflight() {
   local network_driver
   local network_scope
 
-  for file in "$LEGACY_FILE" "$APP_FILE" "$ROUTER_FILE" nginx/router.conf scripts/verify-deployment.sh; do
+  for file in "$LEGACY_FILE" "$APP_FILE" "$ROUTER_FILE" nginx/router.conf.template scripts/render-router-config.sh scripts/verify-deployment.sh; do
     [ -f "$file" ] || { echo "Migration preflight failed: missing ${file}." >&2; return 1; }
   done
 
@@ -178,6 +180,12 @@ migration_preflight() {
     return 1
   fi
 
+  [ ! -e "${DEPLOY_DIR}/active-color" ] || {
+    echo "Migration preflight failed: active-color must not exist before first Blue/Green activation." >&2
+    return 1
+  }
+  ROUTER_CONFIG="$(ensure_runtime_router_config "$DEPLOY_DIR" "$ROUTER_RENDERER")" || return 1
+
   select_docker || return 1
   compose_arrays
   "${DOCKER[@]}" compose version >/dev/null 2>&1 || return 1
@@ -189,7 +197,7 @@ migration_preflight() {
   "${LEGACY_COMPOSE[@]}" config --quiet || return 1
   "${APP_COMPOSE[@]}" config --quiet || return 1
   "${ROUTER_COMPOSE[@]}" config --quiet || return 1
-  "${DOCKER[@]}" run --rm -v "${APP_DIR}/nginx/router.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine nginx -t
+  "${DOCKER[@]}" run --rm -v "${ROUTER_CONFIG}:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine nginx -t
 
   [ -n "$("${LEGACY_COMPOSE[@]}" ps -q)" ] || {
     echo "Migration preflight failed: legacy project is not running." >&2

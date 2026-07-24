@@ -220,6 +220,62 @@ commit_blue_green_state() {
   clear_candidate_deployment_color "$deploy_dir"
 }
 
+runtime_router_config_path() {
+  printf '%s/router/router.conf\n' "$1"
+}
+
+router_target_from_state() {
+  local deploy_dir="$1"
+  if [ -e "${deploy_dir}/active-color" ]; then read_active_deployment_color "$deploy_dir"; else printf 'legacy\n'; fi
+}
+
+ensure_runtime_router_config() {
+  local deploy_dir="$1" renderer="$2" target runtime_file runtime_dir temporary_file
+  target="$(router_target_from_state "$deploy_dir")" || return 1
+  runtime_file="$(runtime_router_config_path "$deploy_dir")"
+  runtime_dir="$(dirname -- "$runtime_file")"
+  ensure_deployment_state_dir "$runtime_dir" || return 1
+  temporary_file="$(mktemp "${runtime_file}.tmp.XXXXXX")" || return 1
+  if ! "$renderer" "$target" > "$temporary_file"; then rm -f -- "$temporary_file"; return 1; fi
+  if [ -f "$runtime_file" ]; then
+    if ! cmp -s -- "$temporary_file" "$runtime_file"; then
+      rm -f -- "$temporary_file"
+      deployment_error "Runtime router configuration disagrees with deployment state: ${runtime_file}"
+      return 1
+    fi
+    rm -f -- "$temporary_file"
+  else
+    mv -f -- "$temporary_file" "$runtime_file" || { rm -f -- "$temporary_file"; return 1; }
+  fi
+  printf '%s\n' "$runtime_file"
+}
+
+reconcile_generated_router_checkout_change() {
+  local repo_dir="$1" dirty_files="$2" deploy_dir active_color renderer tracked_config
+  local runtime_file runtime_dir temporary_file
+  [ "$dirty_files" = " M nginx/router.conf" ] || return 1
+  deploy_dir="${repo_dir}/.deploy"
+  require_stable_router_topology "$deploy_dir" || return 1
+  active_color="$(read_active_deployment_color "$deploy_dir")" || return 1
+  renderer="${repo_dir}/scripts/render-router-config.sh"
+  tracked_config="${repo_dir}/nginx/router.conf"
+  [ -x "$renderer" ] && [ -f "$tracked_config" ] || return 1
+  runtime_file="$(runtime_router_config_path "$deploy_dir")"
+  runtime_dir="$(dirname -- "$runtime_file")"
+  ensure_deployment_state_dir "$runtime_dir" || return 1
+  temporary_file="$(mktemp "${runtime_file}.tmp.XXXXXX")" || return 1
+  if ! "$renderer" "$active_color" > "$temporary_file"; then rm -f -- "$temporary_file"; return 1; fi
+  if ! cmp -s -- "$temporary_file" "$tracked_config"; then
+    rm -f -- "$temporary_file"
+    deployment_error "Tracked router change does not match active-color; refusing automatic reconciliation."
+    return 1
+  fi
+  mv -f -- "$temporary_file" "$runtime_file" || { rm -f -- "$temporary_file"; return 1; }
+  git -C "$repo_dir" restore --source=HEAD --worktree -- nginx/router.conf || return 1
+  [ -z "$(git -C "$repo_dir" status --porcelain --untracked-files=no)" ] || return 1
+  printf 'Moved generated router state to %s and restored tracked nginx/router.conf.\n' "$runtime_file"
+}
+
 acquire_deployment_lock() {
   local deploy_dir="$1"
   local lock_file
@@ -342,8 +398,13 @@ prepare_exact_deployment_commit() {
 
   dirty_files="$(git -C "$repo_dir" status --porcelain --untracked-files=no)"
   if [ -n "$dirty_files" ]; then
-    deployment_error "Deployment checkout has tracked local changes; refusing to replace them."
-    return 1
+    if reconcile_generated_router_checkout_change "$repo_dir" "$dirty_files"; then
+      dirty_files="$(git -C "$repo_dir" status --porcelain --untracked-files=no)"
+    fi
+    if [ -n "$dirty_files" ]; then
+      deployment_error "Deployment checkout has tracked local changes; refusing to replace them."
+      return 1
+    fi
   fi
 
   original_sha="$(git -C "$repo_dir" rev-parse HEAD)"

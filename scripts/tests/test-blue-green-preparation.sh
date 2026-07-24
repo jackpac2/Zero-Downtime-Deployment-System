@@ -146,6 +146,7 @@ grep -Fq 'app-frontend' "$LEGACY_APP_COMPOSE" || fail "legacy frontend alias com
 grep -Fq 'app-backend' "$LEGACY_APP_COMPOSE" || fail "legacy backend alias compatibility"
 grep -Fq 'app-frontend' "$ROUTER_CONFIG" || fail "live router frontend target changed"
 grep -Fq 'app-backend' "$ROUTER_CONFIG" || fail "live router backend target changed"
+grep -Fq '../.deploy/router/router.conf:/etc/nginx/conf.d/default.conf:ro' "${ROOT_DIR}/compose/docker-compose.router.yml" || fail "router does not mount ignored runtime config"
 if grep -Eiq 'nginx[[:space:]].*(-s[[:space:]]+reload|restart)|docker[[:space:]]+compose.*(restart|down)' "$CANDIDATE_SCRIPT"; then
   fail "candidate verifier contains a traffic-switch command"
 fi

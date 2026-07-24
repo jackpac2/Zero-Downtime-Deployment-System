@@ -159,6 +159,7 @@ for (const config of [router, app]) {
 }
 
 assert(hasNetwork(router.services.nginx, 'router'), 'router Nginx must join the shared network')
+assert((router.services.nginx.volumes || []).some((volume) => volume.target === '/etc/nginx/conf.d/default.conf' && volume.source.endsWith('/.deploy/router/router.conf')), 'router Nginx must mount ignored runtime router config')
 assert(hasNetwork(app.services.frontend, 'default'), 'frontend must retain a project-local network')
 assert(hasNetwork(app.services.backend, 'default'), 'backend must retain a project-local network')
 assert(

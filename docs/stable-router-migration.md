@@ -67,5 +67,5 @@ DEPLOY_COLOR=blue IMAGE_TAG=0000000000000000000000000000000000000000 \
 DEPLOY_COLOR=green IMAGE_TAG=0000000000000000000000000000000000000000 \
   docker compose -p zero-downtime-green -f compose/docker-compose.app.yml config --quiet
 docker compose -f compose/docker-compose.router.yml config --quiet
-docker run --rm -v "$PWD/nginx/router.conf:/etc/nginx/conf.d/default.conf:ro" nginx:alpine nginx -t
+bash scripts/tests/test-router-rendering.sh
 ```

@@ -11,7 +11,7 @@ DEPLOY_DIR="${APP_DIR}/.deploy"
 APP_FILE=compose/docker-compose.app.yml
 LEGACY_FILE=compose/docker-compose.app-legacy.yml
 ROUTER_FILE=compose/docker-compose.router.yml
-ROUTER_CONFIG="${APP_DIR}/nginx/router.conf"
+ROUTER_CONFIG="$(runtime_router_config_path "$DEPLOY_DIR")"
 ROUTER_RENDERER="${APP_DIR}/scripts/render-router-config.sh"
 CURRENT_FILE="${DEPLOY_DIR}/current.sha"; PREVIOUS_FILE="${DEPLOY_DIR}/previous.sha"
 ACTIVE_FILE="${DEPLOY_DIR}/active-color"; CANDIDATE_FILE="${DEPLOY_DIR}/candidate-color"
@@ -29,6 +29,7 @@ if [ "${DEPLOYMENT_ASSET_SHA:-}" != "$DEPLOY_SHA" ]; then
   exec "${APP_DIR}/scripts/deploy-blue-green.sh" "$DEPLOY_SHA"
 fi
 verify_exact_deployment_commit "$APP_DIR" "$DEPLOY_SHA" Main
+ROUTER_CONFIG="$(ensure_runtime_router_config "$DEPLOY_DIR" "$ROUTER_RENDERER")"
 if docker info >/dev/null 2>&1; then DOCKER=(docker); elif sudo -n docker info >/dev/null 2>&1; then DOCKER=(sudo -n docker); else echo "Cannot access Docker." >&2; exit 1; fi
 "${DOCKER[@]}" compose version >/dev/null
 ROUTER_COMPOSE=("${DOCKER[@]}" compose -p zero-downtime-router -f "$ROUTER_FILE")
