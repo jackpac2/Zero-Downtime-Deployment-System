@@ -199,7 +199,7 @@ During stable-router activation, a push or merge to `Main`:
 1. Validates the application, scripts, Compose files, Nginx configuration, migration transaction, and bootstrap safety tests.
 2. Builds and publishes frontend, backend, and notifier images tagged with the full SHA, short SHA, and `latest`.
 3. Prints that EC2 deployment is temporarily manual.
-4. Does not SSH to EC2, deploy the legacy project, or run migration.
+4. Does not contact EC2, deploy the legacy project, or run migration.
 
 This temporary guard is required because `deploy.sh` and `rollback.sh` still operate only on the legacy `zero-downtime` project. The old automatic step could otherwise recreate Nginx on port 80 and the notifier on port 9001 after migration. Normal stable-router deployment and rollback are the next phase; automatic EC2 mutation must remain paused until that work is complete.
 ## Production CI/CD Flow
@@ -210,24 +210,31 @@ The production flow is:
 2. GitHub Actions validates the safety helpers and builds frontend, backend, and notifier Docker images.
 3. GitHub Actions tags images with the full Git SHA, short Git SHA, and `latest`.
 4. GitHub Actions pushes images to GHCR.
-5. GitHub Actions connects to EC2 over SSH.
-6. GitHub Actions copies and runs the exact-commit deployment launcher with `<git-sha>`.
-7. EC2 validates and checks out that commit under the shared lock.
-8. EC2 pulls, starts, verifies, and records the exact full-SHA image versions.
+5. A manual dispatch uses GitHub OIDC to assume the configured AWS IAM role.
+6. GitHub Actions resolves the running instance's current public IPv4 address from `EC2_INSTANCE_ID`.
+7. GitHub Actions sends commands to the target EC2 managed node with Systems Manager Run Command.
+8. EC2 validates and checks out that commit under the shared lock.
+9. EC2 pulls, starts, verifies, and records the exact full-SHA image versions.
 
-## Required GitHub Secrets
+## Required GitHub Variables and Secrets
 
-Required repository secrets:
+Required repository variables:
 
-| Secret | Expected value |
+| Variable | Expected value |
 | --- | --- |
-| `EC2_HOST` | Your EC2 public DNS name or public IP address |
-| `EC2_USER` | `ubuntu` |
-| `EC2_SSH_KEY` | Private SSH key that can connect to the EC2 instance |
+| `AWS_REGION` | `us-east-1` |
+| `AWS_ROLE_ARN` | IAM role assumed by GitHub Actions through OIDC |
+| `EC2_INSTANCE_ID` | SSM-managed EC2 instance ID |
+
+`EC2_DEPLOY_USER` is optional and defaults to `ubuntu`. It identifies the non-root account used for repository, Docker, deployment, migration, verification, state, and lock operations.
+
+`EC2_USER`, `EC2_SSH_KEY`, and `EC2_KNOWN_HOSTS` are no longer used by the workflow.
+
+`EC2_HOST` is no longer a repository secret. After OIDC authentication, the workflow uses `ec2:DescribeInstances` with `EC2_INSTANCE_ID` and `AWS_REGION`, requires the instance to be running, and exports its current public IPv4 address for deployment and HTTP verification.
 
 `EC2_APP_DIR` is optional. If empty or unset, every bootstrap step uses exactly `/home/ubuntu/Zero-Downtime-Deployment-System`.
 
-Optional secrets for private GHCR packages:
+Optional repository secrets:
 
 | Secret | Purpose |
 | --- | --- |
@@ -238,13 +245,15 @@ Optional secrets for private GHCR packages:
 
 If the GHCR packages are public, EC2 does not need GHCR login. If they are private, store a GitHub Personal Access Token with package read access as `GHCR_TOKEN`.
 
+The manual workflow copies non-empty GHCR and webhook secrets into uniquely named, short-lived Parameter Store `SecureString` values. The SSM root wrapper retrieves them without printing them, passes them to the deployment user through the process environment, and the workflow deletes the parameters in an `always()` cleanup step. The GitHub OIDC role therefore needs narrowly scoped `ssm:PutParameter` and `ssm:DeleteParameter` access to `/zero-downtime-deployment/github-actions/*`. The EC2 instance role needs `ssm:GetParameter` for the same prefix and decryption permission for the selected KMS key.
+
 ## One-Time EC2 Bootstrap and Stable-Router Migration
 
 The topology-aware deployment path is manual because it can change production topology while the normal deploy and rollback scripts are still legacy-only. In GitHub Actions, open **Build and Deploy**, choose **Run workflow** from `Main`, and start the run. No “new instance” checkbox is required: the workflow reads `.deploy/topology` and selects bootstrap/migration for an absent marker or verification-only behavior for `stable-router`.
 
-The EC2 security group must allow SSH port 22 from the permitted source and public HTTP port 80. Port 9001 must not be public; the notifier remains bound to `127.0.0.1` and is checked over SSH.
+The EC2 security group must allow public HTTP port 80. Direct port 22 access is not required by the workflow. Port 9001 must not be public; the notifier remains bound to `127.0.0.1` and is checked locally by the SSM command.
 
-The bootstrap helper installs missing Git, curl, CA certificates, GnuPG, `util-linux` (`flock`), Docker Engine from Docker's signed official Ubuntu apt repository, and Docker Compose v2. It does not upgrade unrelated packages or reboot. It enables Docker and adds the deployment user to the `docker` group if needed. That SSH session ends, and a fresh connection must pass `docker info` and `docker compose version` without `sudo` before repository or production mutation.
+The bootstrap helper installs missing Git, curl, AWS CLI, CA certificates, GnuPG, `util-linux` (`flock`), Docker Engine from Docker's signed official Ubuntu apt repository, and Docker Compose v2. It does not upgrade unrelated packages or reboot. It enables Docker and adds the deployment user to the `docker` group if needed. A separate SSM process must then pass `docker info` and `docker compose version` as that user without `sudo` before repository or production mutation.
 
 The workflow prints the resolved application directory once, creates its parent for the deployment user, runs `ensure-ec2-repo.sh`, and uses `deployment-common.sh` to prepare and verify the exact workflow SHA from `origin/Main` under `flock`.
 
@@ -301,16 +310,13 @@ The verifier rejects invalid colors and SHAs, requires exactly one running front
 
 The manual workflow prepares a fresh Ubuntu host, but the instance must already have:
 
-- An SSH deployment user, normally `ubuntu`, with passwordless sudo for package, service, and group administration.
-- SSH access configured for `EC2_SSH_KEY`. The workflow accepts a new host key on first contact and rejects a changed key for the remainder of the run.
-- Ports 22 and 80 allowed as described above.
-- Ubuntu user: `ubuntu`
-- Repository cloned at `/home/ubuntu/Zero-Downtime-Deployment-System`
-- Docker installed
-- Docker Compose v2 installed and available as `docker compose`
-- Linux `flock` installed (normally provided by the `util-linux` package)
-- Port `80` open in the EC2 security group
-- SSH access configured for the private key stored in `EC2_SSH_KEY`
+- SSM Agent installed, running, and registered in `us-east-1`.
+- An EC2 instance profile that permits Systems Manager managed-node communication.
+- HTTPS connectivity to Systems Manager endpoints, directly or through VPC endpoints.
+- A deployment user, normally `ubuntu`, with `/home/ubuntu` and passwordless sudo for package, service, directory, and group administration.
+- Port `80` open in the EC2 security group.
+
+The GitHub OIDC role must be restricted to this repository's `production` environment and the intended instance. It needs `ec2:DescribeInstances` to resolve the instance state and current public IPv4 address, `ssm:SendCommand` for `AWS-RunShellScript`, command-invocation read access, and the transient SecureString permissions described above. No permanent AWS access key or SSH private key is used.
 
 Useful checks on EC2:
 
@@ -361,11 +367,13 @@ The server-side verification script retries these checks and starts automatic ro
 
 ## EC2 Repo Bootstrap
 
-The manual bootstrap workflow runs `scripts/ensure-ec2-repo.sh` over SSH before it runs `scripts/deploy.sh`.
+The manual bootstrap workflow delivers the pre-repository bootstrap helpers through SSM Run Command, then runs `scripts/ensure-ec2-repo.sh` as the deployment user before it runs `scripts/deploy.sh`.
 
 The bootstrap script checks whether `/home/ubuntu/Zero-Downtime-Deployment-System/.git` exists for the `ubuntu` user. If it exists, the script validates the checkout but deliberately leaves it unchanged. If it does not exist and the target directory is empty or missing, the script clones `https://github.com/jackpac2/Zero-Downtime-Deployment-System.git` into the ubuntu user's app directory.
 
 The safety-aware deployment launcher performs fetching, allowed-history validation, and exact checkout only after acquiring the production lock. EC2 still does not build images; it pulls and runs the exact GHCR images for the requested commit.
+
+Each Run Command is polled to a terminal state. The workflow prints returned standard output, standard error, status, and response code, and fails when the remote invocation is unsuccessful. Systems Manager's inline `get-command-invocation` output is truncated by AWS; CloudWatch Logs or S3 command output can be added later if complete long-form diagnostic logs become necessary.
 
 ## Compose Project Naming
 

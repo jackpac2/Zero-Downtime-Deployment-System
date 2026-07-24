@@ -131,6 +131,7 @@ installation_required=false
 
 command_available git || base_packages+=(git)
 command_available curl || base_packages+=(curl)
+command_available aws || base_packages+=(awscli)
 package_installed ca-certificates || base_packages+=(ca-certificates)
 command_available gpg || base_packages+=(gnupg)
 command_available flock || base_packages+=(util-linux)
@@ -195,6 +196,7 @@ fi
 
 verify_version git git --version
 verify_version curl curl --version
+verify_version aws aws --version
 verify_version flock flock --version
 verify_version docker docker --version
 verify_version docker-compose docker compose version
@@ -204,7 +206,7 @@ if [ "$TEST_MODE" != true ]; then
     echo "Docker already works without sudo for ${deployment_user}."
   else
     sudo docker info >/dev/null
-    echo "Docker is running; a fresh SSH session is required for non-sudo access."
+    echo "Docker is running; a fresh deployment-user process is required for non-sudo access."
   fi
 fi
 

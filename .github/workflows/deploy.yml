@@ -13,6 +13,7 @@ concurrency:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 env:
   REGISTRY: ghcr.io
@@ -37,8 +38,7 @@ jobs:
 
       - name: Validate stable router migration shell syntax
         run: |
-          bash -n scripts/bootstrap-ec2-host.sh
-          bash -n scripts/migrate-to-stable-router.sh
+          bash -n scripts/*.sh
           bash -n scripts/lib/*.sh
           bash -n scripts/tests/*.sh
 
@@ -194,50 +194,175 @@ jobs:
           echo "The stable-router deployment must be dispatched from the Main branch." >&2
           exit 1
 
-      - name: Configure SSH key
-        id: ssh_setup
+      - name: Validate AWS deployment configuration
+        id: aws_deployment
         if: github.event_name == 'workflow_dispatch'
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+          AWS_ROLE_ARN_VALUE: ${{ vars.AWS_ROLE_ARN }}
+          EC2_INSTANCE_ID_VALUE: ${{ vars.EC2_INSTANCE_ID }}
+          CONFIGURED_DEPLOY_USER: ${{ vars.EC2_DEPLOY_USER }}
         run: |
           set -euo pipefail
-          : "${EC2_HOST:?EC2_HOST is required}"
-          : "${EC2_USER:?EC2_USER is required}"
-          : "${EC2_SSH_KEY:?EC2_SSH_KEY is required}"
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2_deploy_key
-          chmod 600 ~/.ssh/ec2_deploy_key
-          printf '%s\n' \
-            'Host *' \
-            '  StrictHostKeyChecking accept-new' \
-            > ~/.ssh/config
-          chmod 600 ~/.ssh/config
+          : "${AWS_ROLE_ARN_VALUE:?AWS_ROLE_ARN repository variable is required}"
+          : "${EC2_INSTANCE_ID_VALUE:?EC2_INSTANCE_ID repository variable is required}"
+          [ "$AWS_REGION_VALUE" = us-east-1 ] || {
+            echo "AWS_REGION must be us-east-1; found ${AWS_REGION_VALUE:-empty}." >&2
+            exit 1
+          }
+          [[ "$AWS_ROLE_ARN_VALUE" =~ ^arn:aws:iam::[0-9]{12}:role/.+ ]] || {
+            echo "AWS_ROLE_ARN is not a valid IAM role ARN." >&2
+            exit 1
+          }
+          [[ "$EC2_INSTANCE_ID_VALUE" =~ ^i-[0-9a-fA-F]{8}([0-9a-fA-F]{9})?$ ]] || {
+            echo "EC2_INSTANCE_ID is invalid." >&2
+            exit 1
+          }
+          deploy_user="${CONFIGURED_DEPLOY_USER:-ubuntu}"
+          [[ "$deploy_user" =~ ^[a-z_][a-z0-9_-]*$ ]] || {
+            echo "EC2_DEPLOY_USER is invalid." >&2
+            exit 1
+          }
+          echo "deployment_user=$deploy_user" >> "$GITHUB_OUTPUT"
+          echo "Deployment user: $deploy_user"
+          echo "SSM target: $EC2_INSTANCE_ID_VALUE"
+          echo "AWS region: $AWS_REGION_VALUE"
+
+      - name: Configure AWS credentials
+        id: aws_credentials
+        if: github.event_name == 'workflow_dispatch'
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Resolve EC2 public IPv4 address
+        id: ec2_address
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          if ! instance_details=$(aws ec2 describe-instances \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --region "$AWS_REGION_VALUE" \
+            --query 'Reservations[0].Instances[0].{State:State.Name,PublicIp:PublicIpAddress}' \
+            --output json); then
+            echo "EC2 instance ${EC2_INSTANCE_ID} does not exist or could not be described in ${AWS_REGION_VALUE}." >&2
+            echo "Confirm the instance ID, region, and ec2:DescribeInstances permission." >&2
+            exit 1
+          fi
+
+          instance_state=$(jq -r '.State // empty' <<< "$instance_details")
+          EC2_HOST=$(jq -r '.PublicIp // empty' <<< "$instance_details")
+
+          case "$instance_state" in
+            ""|None|null)
+              echo "EC2 instance ${EC2_INSTANCE_ID} does not exist in ${AWS_REGION_VALUE}." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$instance_state" != running ]; then
+            echo "EC2 instance ${EC2_INSTANCE_ID} must be running; found state ${instance_state}." >&2
+            exit 1
+          fi
+          case "$EC2_HOST" in
+            ""|None|null)
+              echo "Running EC2 instance ${EC2_INSTANCE_ID} has no public IPv4 address." >&2
+              exit 1
+              ;;
+          esac
+          [[ "$EC2_HOST" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
+            echo "EC2 instance ${EC2_INSTANCE_ID} returned an invalid public IPv4 address." >&2
+            exit 1
+          }
+
+          echo "::add-mask::$EC2_HOST"
+          echo "EC2_HOST=$EC2_HOST" >> "$GITHUB_ENV"
+          echo "Resolved the public IPv4 address for running EC2 instance ${EC2_INSTANCE_ID}."
+
+      - name: Store transient deployment secrets
+        id: ssm_secrets
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          parameter_prefix="/zero-downtime-deployment/github-actions/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          username_parameter=""
+          token_parameter=""
+          webhook_parameter=""
+          [ -z "$GHCR_USERNAME" ] || username_parameter="${parameter_prefix}/ghcr-username"
+          [ -z "$GHCR_TOKEN" ] || token_parameter="${parameter_prefix}/ghcr-token"
+          [ -z "$DISCORD_WEBHOOK_URL" ] || webhook_parameter="${parameter_prefix}/discord-webhook"
+
+          echo "username_parameter=$username_parameter" >> "$GITHUB_OUTPUT"
+          echo "token_parameter=$token_parameter" >> "$GITHUB_OUTPUT"
+          echo "webhook_parameter=$webhook_parameter" >> "$GITHUB_OUTPUT"
+
+          secret_dir="$(mktemp -d)"
+          cleanup_secret_files() { rm -rf -- "$secret_dir"; }
+          trap cleanup_secret_files EXIT
+          chmod 0700 "$secret_dir"
+
+          put_secure_parameter() {
+            local name="$1" value="$2" label="$3"
+            local value_file="$secret_dir/${label}.value"
+            local request_file="$secret_dir/${label}.json"
+            [ -n "$name" ] || return 0
+            printf '%s' "$value" > "$value_file"
+            chmod 0600 "$value_file"
+            jq -n \
+              --arg name "$name" \
+              --rawfile value "$value_file" \
+              '{Name: $name, Value: $value, Type: "SecureString", Overwrite: true}' \
+              > "$request_file"
+            chmod 0600 "$request_file"
+            aws ssm put-parameter --cli-input-json "file://${request_file}" >/dev/null
+          }
+
+          put_secure_parameter "$username_parameter" "$GHCR_USERNAME" username
+          put_secure_parameter "$token_parameter" "$GHCR_TOKEN" token
+          put_secure_parameter "$webhook_parameter" "$DISCORD_WEBHOOK_URL" webhook
 
       - name: Install EC2 prerequisites
         id: prerequisites
         if: github.event_name == 'workflow_dispatch'
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          DEPLOY_USER: ${{ steps.aws_deployment.outputs.deployment_user }}
         run: |
           set -euo pipefail
-          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            'bash -s' < scripts/bootstrap-ec2-host.sh
+          bash scripts/run-ssm-command.sh \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --comment "Install EC2 deployment prerequisites" \
+            --user "$DEPLOY_USER" \
+            --script scripts/bootstrap-ec2-host.sh
 
-      # This is a separate connection so new docker-group membership is active.
+      # This is a separate SSM process so new docker-group membership is active.
       - name: Verify Docker without sudo after reconnect
         id: docker_access
         if: github.event_name == 'workflow_dispatch'
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          DEPLOY_USER: ${{ steps.aws_deployment.outputs.deployment_user }}
         run: |
           set -euo pipefail
-          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            'set -euo pipefail; docker info >/dev/null; docker compose version'
+          verification_script="$(mktemp)"
+          trap 'rm -f -- "$verification_script"' EXIT
+          printf '%s\n' \
+            'set -euo pipefail' \
+            'docker info >/dev/null' \
+            'docker compose version' \
+            > "$verification_script"
+          bash scripts/run-ssm-command.sh \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --comment "Verify deployment-user Docker access" \
+            --user "$DEPLOY_USER" \
+            --script "$verification_script"
 
       - name: Prepare exact EC2 repository commit
         id: repository
@@ -245,14 +370,17 @@ jobs:
         env:
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
           DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          DEPLOY_USER: ${{ steps.aws_deployment.outputs.deployment_user }}
           REPOSITORY_URL: https://github.com/${{ github.repository }}.git
         run: |
           set -euo pipefail
-          printf -v parent_args '%q ' "$APP_DIR"
-          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "bash -s -- $parent_args" <<'REMOTE'
+          directory_script="$(mktemp)"
+          exact_commit_script="$(mktemp)"
+          cleanup_repository_scripts() { rm -f -- "$directory_script" "$exact_commit_script"; }
+          trap cleanup_repository_scripts EXIT
+
+          cat > "$directory_script" <<'REMOTE'
           set -euo pipefail
           app_dir="$1"
           if [ ! -e "$app_dir" ]; then
@@ -265,48 +393,59 @@ jobs:
           }
           REMOTE
 
-          printf -v repo_args '%q ' "$APP_DIR" "$REPOSITORY_URL" Main
-          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "bash -s -- $repo_args" < scripts/ensure-ec2-repo.sh
+          bash scripts/run-ssm-command.sh \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --comment "Create and validate EC2 application directory" \
+            --user "$DEPLOY_USER" \
+            --script "$directory_script" \
+            -- "$APP_DIR"
 
-          printf -v app_arg '%q' "$APP_DIR"
-          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "test \"\$(stat -c '%U' $app_arg)\" = \"\$(id -un)\""
+          bash scripts/run-ssm-command.sh \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --comment "Initialize EC2 deployment repository" \
+            --user "$DEPLOY_USER" \
+            --script scripts/ensure-ec2-repo.sh \
+            -- "$APP_DIR" "$REPOSITORY_URL" Main
 
-          tar -czf - scripts/lib/deployment-common.sh | \
-            ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-              "mkdir -p $app_arg/.deploy/bootstrap/$DEPLOY_SHA && tar -xzf - -C $app_arg/.deploy/bootstrap/$DEPLOY_SHA"
-
-          printf -v exact_args '%q ' "$APP_DIR" "$DEPLOY_SHA"
-          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "bash -s -- $exact_args" <<'REMOTE'
+          {
+            cat scripts/lib/deployment-common.sh
+            cat <<'REMOTE'
           set -euo pipefail
           app_dir="$1"
           deploy_sha="$2"
-          source "$app_dir/.deploy/bootstrap/$deploy_sha/scripts/lib/deployment-common.sh"
           validate_deployment_sha "$deploy_sha" "Workflow deployment SHA"
           ensure_deployment_state_dir "$app_dir/.deploy"
           acquire_deployment_lock "$app_dir/.deploy"
           prepare_exact_deployment_commit "$app_dir" "$deploy_sha" Main
           verify_exact_deployment_commit "$app_dir" "$deploy_sha" Main
           test "$(git -C "$app_dir" rev-parse HEAD)" = "${deploy_sha,,}"
+          test "$(stat -c '%U' "$app_dir")" = "$(id -un)"
           test -x "$app_dir/scripts/deploy.sh"
           test -f "$app_dir/scripts/migrate-to-stable-router.sh"
+          test -f "$app_dir/scripts/stable-router-deployment-coordinator.sh"
+          test -f "$app_dir/scripts/ssm-execute-deployment.sh"
           REMOTE
+          } > "$exact_commit_script"
+
+          bash scripts/run-ssm-command.sh \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --comment "Prepare exact EC2 deployment commit" \
+            --user "$DEPLOY_USER" \
+            --script "$exact_commit_script" \
+            -- "$APP_DIR" "$DEPLOY_SHA"
 
       - name: Inspect topology marker
         id: topology
         if: github.event_name == 'workflow_dispatch'
         env:
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          DEPLOY_USER: ${{ steps.aws_deployment.outputs.deployment_user }}
         run: |
           set -euo pipefail
-          printf -v topology_arg '%q' "$APP_DIR"
-          set +e
-          starting_topology=$(ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "bash -s -- $topology_arg" <<'REMOTE'
+          topology_script="$(mktemp)"
+          trap 'rm -f -- "$topology_script"' EXIT
+          cat > "$topology_script" <<'REMOTE'
           set -euo pipefail
           topology_file="$1/.deploy/topology"
           if [ ! -e "$topology_file" ]; then
@@ -327,7 +466,13 @@ jobs:
           echo "Unknown topology marker value: ${topology:-empty}" >&2
           exit 1
           REMOTE
-          )
+          set +e
+          starting_topology=$(bash scripts/run-ssm-command.sh \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --comment "Inspect deployment topology" \
+            --user "$DEPLOY_USER" \
+            --script "$topology_script" \
+            -- "$APP_DIR")
           topology_status=$?
           set -e
           echo "starting_topology=$starting_topology" >> "$GITHUB_OUTPUT"
@@ -340,129 +485,76 @@ jobs:
         env:
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
           DEPLOY_SHA: ${{ steps.vars.outputs.sha }}
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          DEPLOY_USER: ${{ steps.aws_deployment.outputs.deployment_user }}
+          GHCR_USERNAME_PARAMETER: ${{ steps.ssm_secrets.outputs.username_parameter }}
+          GHCR_TOKEN_PARAMETER: ${{ steps.ssm_secrets.outputs.token_parameter }}
+          DISCORD_WEBHOOK_PARAMETER: ${{ steps.ssm_secrets.outputs.webhook_parameter }}
         run: |
           set -euo pipefail
-          printf -v remote_args '%q ' "$APP_DIR" "$DEPLOY_SHA" "$EC2_HOST"
-          {
-            printf 'GHCR_USERNAME=%q\n' "$GHCR_USERNAME"
-            printf 'GHCR_TOKEN=%q\n' "$GHCR_TOKEN"
-            printf 'DISCORD_WEBHOOK_URL=%q\n' "$DISCORD_WEBHOOK_URL"
-            cat <<'REMOTE'
+          : "${EC2_HOST:?Resolved EC2 public IPv4 address is unavailable}"
+          invocation_script="$(mktemp)"
+          trap 'rm -f -- "$invocation_script"' EXIT
+          cat > "$invocation_script" <<'REMOTE'
           set -euo pipefail
-          app_dir="$1"
-          deploy_sha="$2"
-          ec2_host="$3"
-          app_url="http://${ec2_host}"
-          topology_file="$app_dir/.deploy/topology"
-          legacy_file=compose/docker-compose.prod.yml
-          app_file=compose/docker-compose.app-legacy.yml
-          router_file=compose/docker-compose.router.yml
-
-          cd "$app_dir"
-          source scripts/lib/deployment-common.sh
-          validate_deployment_sha "$deploy_sha" "Workflow deployment SHA"
-          verify_exact_deployment_commit "$app_dir" "$deploy_sha" Main
-
-          verify_project_services() {
-            local project="$1" file="$2" expected="$3" actual
-            actual=$(docker compose -p "$project" -f "$file" ps --services --status running | sort | tr '\n' ' ' | sed 's/ $//')
-            [ "$actual" = "$expected" ] || {
-              echo "Unexpected running services for ${project}: ${actual:-none}; expected ${expected}." >&2
-              return 1
-            }
-            docker compose -p "$project" -f "$file" ps
-          }
-
-          verify_revision() {
-            local project="$1" file="$2" service="$3" expected_sha="$4" image_id revision
-            image_id=$(docker compose -p "$project" -f "$file" images -q "$service" | head -n 1)
-            [ -n "$image_id" ] || { echo "No image found for ${project}/${service}." >&2; return 1; }
-            revision=$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_id")
-            [ "${revision,,}" = "${expected_sha,,}" ] || {
-              echo "Revision mismatch for ${project}/${service}: expected ${expected_sha}, found ${revision:-missing}." >&2
-              return 1
-            }
-          }
-
-          verify_stable_router() {
-            local expected_sha
-            expected_sha=$(read_deployment_sha_file "$app_dir/.deploy/current.sha" "Current deployment SHA")
-            export IMAGE_TAG="$expected_sha"
-            export DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
-            verify_project_services zero-downtime-app "$app_file" "backend frontend"
-            verify_project_services zero-downtime-router "$router_file" "nginx notifier"
-            docker network inspect zero-downtime-router >/dev/null
-            curl -fsS "${app_url}/router-health" >/dev/null
-            curl -fsS "${app_url}/" >/dev/null
-            curl -fsS "${app_url}/api/health" >/dev/null
-            curl -fsS http://127.0.0.1:9001/health >/dev/null
-            test "$(tr -d '[:space:]' < "$topology_file")" = stable-router
-            if [ -n "$(docker ps -q --filter label=com.docker.compose.project=zero-downtime)" ]; then
-              echo "Legacy zero-downtime project still has running containers." >&2
-              return 1
-            fi
-            verify_revision zero-downtime-app "$app_file" frontend "$expected_sha"
-            verify_revision zero-downtime-app "$app_file" backend "$expected_sha"
-            verify_revision zero-downtime-router "$router_file" notifier "$expected_sha"
-          }
-
-          if [ -e "$topology_file" ]; then
-            topology="$(tr -d '[:space:]' < "$topology_file")"
-          else
-            topology=absent
-          fi
-
-          case "$topology" in
-            absent)
-              APP_URL="$app_url" EC2_HOST="$ec2_host" EC2_APP_DIR="$app_dir" \
-                GHCR_USERNAME="$GHCR_USERNAME" GHCR_TOKEN="$GHCR_TOKEN" \
-                DISCORD_WEBHOOK_URL="$DISCORD_WEBHOOK_URL" \
-                ./scripts/deploy.sh "$deploy_sha"
-              export IMAGE_TAG="$deploy_sha"
-              verify_project_services zero-downtime "$legacy_file" "backend frontend nginx notifier"
-              ./scripts/verify-deployment.sh "$app_url"
-              curl -fsS http://127.0.0.1:9001/health >/dev/null
-              test "$(tr -d '[:space:]' < .deploy/current.sha)" = "${deploy_sha,,}"
-              APP_URL="$app_url" EC2_HOST="$ec2_host" EC2_APP_DIR="$app_dir" \
-                GHCR_USERNAME="$GHCR_USERNAME" GHCR_TOKEN="$GHCR_TOKEN" \
-                DISCORD_WEBHOOK_URL="$DISCORD_WEBHOOK_URL" \
-                bash scripts/migrate-to-stable-router.sh "$deploy_sha"
-              ;;
-            stable-router)
-              echo "The one-time stable-router migration has already completed; verifying without mutation."
-              ;;
-            *)
-              echo "Unknown topology marker value: ${topology:-empty}" >&2
-              exit 1
-              ;;
-          esac
-
-          verify_stable_router
-          echo "Stable-router topology verification completed successfully."
+          exec bash "$2/scripts/ssm-execute-deployment.sh" "$@" "$2/scripts/stable-router-deployment-coordinator.sh"
           REMOTE
-          } | ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "bash -s -- $remote_args"
+          bash scripts/run-ssm-command.sh \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --comment "Deploy and verify stable-router topology" \
+            --root \
+            --script "$invocation_script" \
+            -- "$DEPLOY_USER" "$APP_DIR" "$DEPLOY_SHA" "$EC2_HOST" "$AWS_REGION_VALUE" \
+               "$GHCR_USERNAME_PARAMETER" "$GHCR_TOKEN_PARAMETER" "$DISCORD_WEBHOOK_PARAMETER"
 
       - name: Collect safe failure diagnostics
         if: failure() && github.event_name == 'workflow_dispatch' && steps.docker_access.outcome == 'success'
         env:
           APP_DIR: ${{ steps.deployment_context.outputs.app_dir }}
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          DEPLOY_USER: ${{ steps.aws_deployment.outputs.deployment_user }}
         run: |
           set -euo pipefail
-          printf -v app_arg '%q' "$APP_DIR"
-          ssh -o BatchMode=yes -i ~/.ssh/ec2_deploy_key "$EC2_USER@$EC2_HOST" \
-            "cd $app_arg && for project_file in 'zero-downtime compose/docker-compose.prod.yml' 'zero-downtime-app compose/docker-compose.app-legacy.yml' 'zero-downtime-router compose/docker-compose.router.yml'; do set -- \$project_file; docker compose -p \"\$1\" -f \"\$2\" ps || true; done; if [ -f .deploy/topology ]; then printf 'Topology marker: '; tr -d '[:space:]' < .deploy/topology; echo; fi"
+          diagnostics_script="$(mktemp)"
+          trap 'rm -f -- "$diagnostics_script"' EXIT
+          cat > "$diagnostics_script" <<'REMOTE'
+          set -euo pipefail
+          cd "$1"
+          for project_file in \
+            'zero-downtime compose/docker-compose.prod.yml' \
+            'zero-downtime-app compose/docker-compose.app-legacy.yml' \
+            'zero-downtime-router compose/docker-compose.router.yml'; do
+            set -- $project_file
+            docker compose -p "$1" -f "$2" ps || true
+          done
+          if [ -f .deploy/topology ]; then
+            printf 'Topology marker: '
+            tr -d '[:space:]' < .deploy/topology
+            echo
+          fi
+          REMOTE
+          bash scripts/run-ssm-command.sh \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --comment "Collect deployment failure diagnostics" \
+            --user "$DEPLOY_USER" \
+            --script "$diagnostics_script" \
+            -- "$APP_DIR"
 
-      - name: Remove temporary SSH material
-        if: always()
-        run: rm -f ~/.ssh/ec2_deploy_key ~/.ssh/config ~/.ssh/known_hosts
+      - name: Remove transient deployment secrets
+        if: always() && github.event_name == 'workflow_dispatch' && steps.aws_credentials.outcome == 'success'
+        env:
+          GHCR_USERNAME_PARAMETER: ${{ steps.ssm_secrets.outputs.username_parameter }}
+          GHCR_TOKEN_PARAMETER: ${{ steps.ssm_secrets.outputs.token_parameter }}
+          DISCORD_WEBHOOK_PARAMETER: ${{ steps.ssm_secrets.outputs.webhook_parameter }}
+        run: |
+          set -euo pipefail
+          for parameter_name in \
+            "$GHCR_USERNAME_PARAMETER" \
+            "$GHCR_TOKEN_PARAMETER" \
+            "$DISCORD_WEBHOOK_PARAMETER"; do
+            [ -z "$parameter_name" ] || aws ssm delete-parameter --name "$parameter_name" >/dev/null
+          done
 
       - name: Write workflow summary
         if: always()

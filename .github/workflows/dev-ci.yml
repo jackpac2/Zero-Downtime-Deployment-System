@@ -96,8 +96,7 @@ jobs:
       - name: Validate deployment shell syntax
         id: shell_syntax_validation
         run: |
-          bash -n scripts/bootstrap-ec2-host.sh
-          bash -n scripts/migrate-to-stable-router.sh
+          bash -n scripts/*.sh
           bash -n scripts/lib/*.sh
           bash -n scripts/tests/*.sh
 
